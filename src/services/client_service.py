@@ -1,0 +1,82 @@
+from datetime import datetime, timezone
+from uuid import uuid4
+from fastapi import HTTPException
+from sqlmodel.ext.asyncio.session import AsyncSession
+from src.repositories.client_repository import ClientRepo
+from src.Database.models import Client
+from src.schema.client_schema import ClientCreate, ClientUpdate
+from src.utils.logger import logger
+from src.utils.hash_util import hash_util
+
+
+class ClientService:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.client_repo = ClientRepo(session)
+        self.hash_handler = hash_util
+
+
+    async def create_client(self, client: ClientCreate) -> Client:
+        logger.info(f"Creating client: {client.client_name}")
+
+        existing = await self.client_repo.get_client_by_email(client)
+        if existing:
+            raise HTTPException(status_code=400, detail="Client already exists")
+        
+        hashed_password = self.hash_handler.get_password_hash(client.password)
+
+        client = Client(
+            client_id=str(uuid4()),
+            client_name=client.client_name,
+            client_email=client.client_email,
+            phone=client.phone,
+            password=hashed_password,
+            allowed_agents=client.allowed_agents,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc)
+        )
+
+        created_client = await self.client_repo.create_client(client)
+
+        return {
+            "message": "Client created successfully",
+            "client": created_client
+        }
+
+
+    async def update_client(self, client_id: str, client: ClientUpdate):
+        existing_client = await self.client_repo.get_client_by_id(client_id)
+
+        if not existing_client:
+            raise HTTPException(status_code=404, detail="Client not found")
+
+        updated_client = await self.client_repo.update_client(existing_client, client)
+
+        return {
+            "message": "Client updated successfully",
+             "client": updated_client
+        }
+
+
+    async def delete_client(self, client_id: str):
+        existing_client = await self.client_repo.get_client_by_id(client_id)
+
+        if not existing_client:
+            raise HTTPException(status_code=404, detail="Client not found")
+
+        await self.client_repo.delete_client(existing_client)
+
+        return {"message": "Client deleted successfully"}
+    
+
+    async def get_all_clients(self, page: int, size: int):
+        return await self.client_repo.get_all_clients(page, size)
+
+
+    async def get_client_by_id(self, client_id: str):
+        client = await self.client_repo.get_client_by_id(client_id)
+
+        if not client:
+            raise HTTPException(status_code=404, detail="Client not found")
+
+        return client

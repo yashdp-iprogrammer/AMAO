@@ -1,0 +1,11 @@
+__pycache__/
+.venv
+test/*
+!test/.gitkeep
+.env
+src/vector_stores/*
+!src/vector_stores/.gitkeep
+src/configs/*
+!src/configs/.gitkeep
+logs/*
+!logs/.gitkeep
