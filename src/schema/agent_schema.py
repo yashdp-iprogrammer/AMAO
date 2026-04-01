@@ -22,7 +22,6 @@ class AgentCreate(BaseModel):
     token_limit: int
     
 class AgentVersion(BaseModel):
-    agent_name: str
     agent_version: str
     
     # Optional configs

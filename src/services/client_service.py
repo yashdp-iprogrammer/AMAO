@@ -24,14 +24,21 @@ class ClientService:
             raise HTTPException(status_code=400, detail="Client already exists")
         
         hashed_password = self.hash_handler.get_password_hash(client.password)
+        
+        client_dict = client.model_dump()
+
+        client_dict["allowed_agents"] = {
+            k: v.model_dump(exclude_none=True)
+            for k, v in client.allowed_agents.items()
+        }
 
         client = Client(
             client_id=str(uuid4()),
-            client_name=client.client_name,
-            client_email=client.client_email,
-            phone=client.phone,
+            client_name=client_dict["client_name"],
+            client_email=client_dict["client_email"],
+            phone=client_dict["phone"],
             password=hashed_password,
-            allowed_agents=client.allowed_agents,
+            allowed_agents=client_dict["allowed_agents"],
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc)
         )

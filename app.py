@@ -1,6 +1,6 @@
 import streamlit as st
 import requests
-import yaml
+import json
 
 
 st.set_page_config(page_title="AMAO")
@@ -66,7 +66,6 @@ def api_get_clients():
     url = f"{BASE_URL}/clients/list-clients"
     res = requests.get(url, headers=get_headers())
     clients_obj = res.json()
-    # print(clients_obj.get("data"))
     return clients_obj.get("data")
 
 
@@ -79,15 +78,13 @@ def api_create_config(client_id, config):
 
 def api_read_config(client_id):
     url = f"{BASE_URL}/configs/read-config/{client_id}"
-    # print("reading config with:", url)
     res = requests.get(url, headers=get_headers())
-    # print(res.json())
     return res.json()
 
 
 # LOGIN PAGE
 def login_ui():
-    st.title("🚀 ADAO Enterprise Login")
+    st.title("🚀 AMAO Enterprise Login")
 
     with st.container(border=True):
         u = st.text_input("Username/Email")
@@ -174,23 +171,29 @@ def superadmin_ui():
 
         with col1:
             with st.form("client_form"):
-                c_id = st.text_input("Client Slug (ID)")
                 c_name = st.text_input("Full Name")
                 c_email = st.text_input("Email")
                 c_phone = st.text_input("Phone")
                 c_pass = st.text_input("Password", type="password")
+                c_allowed_agents = st.text_area("Allowed Agents", height=130)
 
                 if st.form_submit_button("Register", use_container_width=True):
                     try:
-                        url = f"{BASE_URL}/clients"
+
+                        if not c_allowed_agents.strip():
+                            st.error("Allowed Agents JSON cannot be empty")
+                            st.stop()
+
+                        c_allowed_agents_dict = json.loads(c_allowed_agents)
+                        url = f"{BASE_URL}/clients/add-client"
+                        
                         payload = {
-                            "client_id": c_id,
                             "client_name": c_name,
                             "client_email": c_email,
                             "phone": c_phone,
-                            "password": c_pass
+                            "password": c_pass,
+                            "allowed_agents": c_allowed_agents_dict
                         }
-
                         res = requests.post(
                             url,
                             json=payload,
@@ -200,6 +203,8 @@ def superadmin_ui():
                         res.raise_for_status()
                         st.success("Client registered!")
 
+                    except json.JSONDecodeError:
+                        st.error("Invalid JSON format for Allowed Agents")
                     except Exception as e:
                         st.error(str(e))
 
@@ -229,25 +234,19 @@ def superadmin_ui():
                 c1, c2 = st.columns(2)
 
                 with c1:
-                    file = st.file_uploader("Upload config.yaml", type=["yaml"])
+                    config = st.text_area("Upload config json", height=250)
 
-                    if st.button("Save Config") and file:
-                        content = yaml.safe_load(file)
-
+                    if st.button("Save Config") and config:
+                        content = json.loads(config)
                         api_create_config(client_id, content)
 
                         st.success("Config saved!")
 
                 with c2:
-                    # if st.button("View Config"):
-                    #     config = api_read_config(client_id)
-                    #     st.json(config)
-                    
                     if st.button("View Config"):
                         config = api_read_config(client_id)
-                        
-                        yaml_str = yaml.safe_dump(config, sort_keys=False)  # convert dict → YAML
-                        st.code(yaml_str, language="yaml") 
+                        st.json(config)
+
 
         except Exception as e:
             st.error(str(e))

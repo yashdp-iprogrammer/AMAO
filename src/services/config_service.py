@@ -3,9 +3,11 @@ import yaml
 from fastapi import HTTPException
 from src.utils.logger import logger
 from sqlmodel.ext.asyncio.session import AsyncSession
-from src.schema.config_schema import ConfigCreate, ConfigUpdate
+from src.schema.config_schema import ConfigCreate
+from src.schema.client_schema import ClientUpdate
 from src.repositories.agent_repository import AgentRepo
 from src.repositories.model_repository import ModelRepo
+from src.repositories.client_repository import ClientRepo
 
 class ConfigService:
 
@@ -13,6 +15,7 @@ class ConfigService:
         self.session = session
         self.agent_repo = AgentRepo(session)
         self.model_repo = ModelRepo(session)
+        self.client_repo = ClientRepo(session)
         self.base_dir = os.path.abspath(base_dir)
         self._config_cache = {}
         self._db_cache = {}
@@ -71,16 +74,23 @@ class ConfigService:
 
         config_path = self._get_client_config_path(client_id)
 
-        if os.path.exists(config_path):
-            raise HTTPException(status_code=400, detail="Config file already exists")
+        # if os.path.exists(config_path):
+        #     raise HTTPException(status_code=400, detail="Config file already exists")
 
         self._ensure_client_dir(client_id)
 
         agents_data = {}
+        db_agents_data = {}
 
-        for agent in config.allowed_agents:
+        for agent_name, agent in config.allowed_agents.items():
 
-            agent_info = await self.agent_repo.get_agent_by_version(agent.agent_name, agent.agent_version)
+            agent_info = await self.agent_repo.get_agent_by_version(agent_name, agent.agent_version)
+            if not agent_info:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid agent/version: {agent_name} ({agent.agent_version})"
+                )
+                
             model_info = await self.model_repo.get_model_by_id(agent_info.model_id)
 
             agent_dict = {
@@ -92,55 +102,64 @@ class ConfigService:
                 "description": getattr(agent_info, "description", "")
             }
 
-            if hasattr(agent, "database") and agent.database:
+            if agent.database:
                 agent_dict["database"] = {
                     k: v.model_dump(exclude_none=True)
                     for k, v in agent.database.items()
                 }
 
-            if hasattr(agent, "rag") and agent.rag:
+            if agent.rag:
                 rag_config = agent.rag.model_dump(exclude_none=True)
                 agent_dict["top_k"] = rag_config.get("top_k", 3)
                 agent_dict["vector_db"] = rag_config.get("vector_db", "faiss")
 
-            agents_data[agent.agent_name] = agent_dict
+            agents_data[agent_name] = agent_dict
+            db_agents_data[agent_name] = agent.model_dump(exclude_none=True)
 
         config_dict = {
             "client_name": config.client_name,
             "allowed_agents": agents_data
         }
 
+            
+        existing_client = await self.client_repo.get_client_by_id(client_id)
+        if not existing_client:
+            raise HTTPException(status_code=404, detail="Client not found")
+
+        update_payload = ClientUpdate(allowed_agents=db_agents_data)
+        await self.client_repo.update_client(existing_client, update_payload)
+        
         with open(config_path, "w") as f:
             logger.info(f"Creating config for client {client_id}")
             yaml.safe_dump(config_dict, f, sort_keys=False)
-
+        
         self._config_cache[client_id] = config_dict
 
         return {"message": "Config file created successfully"}
+
     
-    
-    def update_config(self, client_id: str, config: ConfigUpdate):
+    # def update_config(self, client_id: str, config: ConfigUpdate):
 
-        config_path = self._get_client_config_path(client_id)
+    #     config_path = self._get_client_config_path(client_id)
 
-        try:
-            with open(config_path, "r") as f:
-                logger.info(f"Updating config for client {client_id}")
-                existing_config = yaml.safe_load(f) or {}
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="Config file not found")
+    #     try:
+    #         with open(config_path, "r") as f:
+    #             logger.info(f"Updating config for client {client_id}")
+    #             existing_config = yaml.safe_load(f) or {}
+    #     except FileNotFoundError:
+    #         raise HTTPException(status_code=404, detail="Config file not found")
 
-        update_data = config.model_dump(exclude_none=True)
+    #     update_data = config.model_dump(exclude_none=True)
 
-        existing_config.update(update_data)
+    #     existing_config.update(update_data)
 
-        with open(config_path, "w") as f:
-            yaml.safe_dump(existing_config, f, sort_keys=False)
+    #     with open(config_path, "w") as f:
+    #         yaml.safe_dump(existing_config, f, sort_keys=False)
             
-        self._config_cache[client_id] = existing_config
-        self._db_cache.pop(client_id, None)
+    #     self._config_cache[client_id] = existing_config
+    #     self._db_cache.pop(client_id, None)
 
-        return {"message": "Config file updated successfully"}
+    #     return {"message": "Config file updated successfully"}
     
     
     def remove_config(self, client_id: str):

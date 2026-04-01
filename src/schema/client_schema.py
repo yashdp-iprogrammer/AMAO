@@ -12,7 +12,7 @@ class ClientCreate(BaseModel):
     client_email: EmailStr
     phone: str
     password: str = Field(min_length=8, max_length=128)
-    allowed_agents: Optional[Dict] = None
+    allowed_agents: Dict[str, AgentVersion] = None
 
     @field_validator("phone")
     def validate_phone(cls, v):
@@ -26,7 +26,7 @@ class ClientUpdate(BaseModel):
     client_email: Optional[EmailStr] = None
     client_password:Optional[str] = None
     phone: Optional[str] = None
-    allowed_agents: Optional[Dict] = None
+    allowed_agents: Optional[Dict[str, AgentVersion]] = None
     is_disabled: Optional[bool] = None
 
     @field_validator("phone")

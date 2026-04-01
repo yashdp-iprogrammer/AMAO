@@ -4,7 +4,7 @@ from src.schema.agent_schema import AgentVersion
 
 class ConfigCreate(BaseModel):
     client_name: str
-    allowed_agents: list[AgentVersion]
+    allowed_agents: Dict[str, AgentVersion]
     
 
 class ConfigUpdate(BaseModel):
