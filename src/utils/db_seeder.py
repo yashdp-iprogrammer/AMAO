@@ -4,12 +4,15 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.Database.models import Role, Client, User
 from src.utils.hash_util import hash_util
+from src.utils.logger import logger
 
 
 async def seed_initial_data(session: AsyncSession):
     """
     Populate DB only if tables are empty.
     """
+
+    logger.info("[DB SEEDER] Checking if database seeding is required")
 
     # --------------------------------------------------
     # 1️⃣ Check if DB already has data
@@ -24,16 +27,18 @@ async def seed_initial_data(session: AsyncSession):
         client_count.scalar_one() > 0 or
         user_count.scalar_one() > 0
     ):
-        print("Database already contains data. Skipping seeding.")
+        logger.warning("[DB SEEDER] Database already contains data. Skipping seeding")
         return
 
-    print("Database is empty. Seeding initial data...")
+    logger.info("Database is empty. Seeding initial data")
 
     now = datetime.now(timezone.utc)
 
     # --------------------------------------------------
     # 2️⃣ Insert Roles
     # --------------------------------------------------
+
+    logger.info("[DB SEEDER] Seeding roles")
 
     roles = [
         Role(role_id=1, role_name="superadmin", created_at=now, updated_at=now),
@@ -47,6 +52,8 @@ async def seed_initial_data(session: AsyncSession):
     # --------------------------------------------------
     # 3️⃣ Insert Default Client
     # --------------------------------------------------
+
+    logger.info("[DB SEEDER] Seeding default client")
 
     client = Client(
         client_id=str(uuid4()),
@@ -67,6 +74,8 @@ async def seed_initial_data(session: AsyncSession):
     # 4️⃣ Insert SuperAdmin User
     # --------------------------------------------------
 
+    logger.info("[DB SEEDER] Seeding superadmin user")
+
     password_handler = hash_util
     hashed_password = password_handler.get_password_hash("SuperAdmin@123")
 
@@ -86,4 +95,4 @@ async def seed_initial_data(session: AsyncSession):
     session.add(user)
     await session.commit()
 
-    print("Initial data seeded successfully.")
+    logger.info("[DB SEEDER] Initial data seeded successfully")

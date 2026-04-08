@@ -1,33 +1,5 @@
-# from sqlalchemy import inspect
-
-
-# class SQLSchemaExtractor:
-
-#     def extract_schema(self, connection):
-
-#         engine = connection.engine
-#         inspector = inspect(engine)
-
-#         schema = {}
-
-#         tables = inspector.get_table_names()
-
-#         for table in tables:
-
-#             columns = inspector.get_columns(table)
-
-#             schema[table] = [
-#                 {
-#                     "column_name": col["name"],
-#                     "type": str(col["type"])
-#                 }
-#                 for col in columns
-#             ]
-
-#         return schema
-
-
 from sqlalchemy import inspect
+from src.utils.logger import logger
 
 
 class SQLSchemaExtractor:
@@ -36,8 +8,9 @@ class SQLSchemaExtractor:
 
         engine = connection.engine
 
-        async with engine.connect() as conn:
+        logger.info("[SQLSchemaExtractor] Extracting schema")
 
+        async with engine.connect() as conn:
             schema = await conn.run_sync(self._extract_sync)
 
         return schema

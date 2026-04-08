@@ -5,6 +5,7 @@ from langgraph.graph import StateGraph, END
 from src.core.state_manager import AgentState
 from src.prompts.router_prompt import ROUTER_PROMPT
 from src.prompts.final_prompt import FINAL_PROMPT
+from src.utils.logger import logger
 
 
 class Orchestrator:
@@ -12,19 +13,22 @@ class Orchestrator:
     def __init__(self, agents: Dict[str, Any], llm):
         
         if not agents:
+            logger.warning("[ORCHESTRATOR] Initialized without agents")
             raise Exception("No agents configured")
+
         self.agents = agents
         self.agent_names = list(self.agents.keys())
         self.agent_name_set = set(self.agent_names)
         self.llm = llm
+
+        logger.info(f"[ORCHESTRATOR] Initialized | agents={self.agent_names}")
+
         self.graph = self.build_graph()
         
         
     def _extract_json(self, text: str):
 
         text = re.sub(r"```json|```", "", text).strip()
-
-        # extract JSON array
         match = re.search(r"\[.*\]", text, re.DOTALL)
 
         if match:
@@ -36,8 +40,9 @@ class Orchestrator:
     async def router_node(self, state: AgentState):
 
         query = state.get("user_query", "")
-
         available_agents = self.agent_names
+
+        logger.info(f"[ORCHESTRATOR] Routing query | agents={available_agents}")
 
         agent_list_text = "\n".join([f"- {name}" for name in available_agents])
    
@@ -49,18 +54,17 @@ class Orchestrator:
         )   
 
         response = await self.llm.ainvoke(routing_prompt)
-
         raw_output = response.content.strip()
 
         try:
             clean_json = self._extract_json(raw_output)
             execution_plan: List[Dict[str, str]] = json.loads(clean_json)
         except Exception:
+            logger.warning("[ORCHESTRATOR] Router failed to parse LLM output, using fallback plan")
             execution_plan = [
                 {"agent": available_agents[0], "query": query}
             ]
 
-        # Safety filtering
         filtered_plan = []
         for step in execution_plan:
             agent_name = step.get("agent")
@@ -73,15 +77,16 @@ class Orchestrator:
                 })
 
         if not filtered_plan:
+            logger.warning("[ORCHESTRATOR] Empty execution plan after filtering, using fallback")
             filtered_plan = [
                 {"agent": available_agents[0], "query": query}
             ]
 
+        logger.info(f"[ORCHESTRATOR] Execution plan created | steps={len(filtered_plan)}")
+
         state["execution_plan"] = filtered_plan
         state["execution_index"] = 0
         state["execution_trace"] = state.get("execution_trace", []) + ["router"]
-
-        # print("Execution Plan:", filtered_plan)
 
         return state
 
@@ -96,6 +101,8 @@ class Orchestrator:
             if current_index >= len(plan):
                 return state
 
+            logger.info(f"[ORCHESTRATOR] Executing agent | name={agent.name}, step={current_index}")
+
             result = await agent.run(state)
 
             trace = state.get("execution_trace", [])
@@ -103,7 +110,6 @@ class Orchestrator:
 
             state.update(result)
             state["execution_trace"] = trace
-
             state["execution_index"] = current_index + 1
 
             return state
@@ -114,14 +120,7 @@ class Orchestrator:
     async def final_node(self, state: AgentState):
 
         query = state.get("user_query", "")
-        # sql_results = state.get("sql_results", [])
-        # rag_results = state.get("rag_results", [])
-        
-        # if not sql_results and not rag_results:
-        #     return {
-        #         "response": "No relevant data found for the query."
-        #     }
-        
+
         structured_context = []
 
         for step in state.get("execution_plan", []):
@@ -135,10 +134,12 @@ class Orchestrator:
                     "result": result.get("rows") or result.get("documents") or result
                 })
         
-        
         if not structured_context:
+            logger.info("[ORCHESTRATOR] No data found for final response generation")
             state["final_response"] = "No relevant data found for the query."
             return state
+
+        logger.info(f"[ORCHESTRATOR] Generating final response | context_size={len(structured_context)}")
 
         prompt = FINAL_PROMPT.format(
             query=query,
@@ -147,6 +148,8 @@ class Orchestrator:
 
         response = await self.llm.ainvoke(prompt)
         state["final_response"] = response.content
+
+        logger.info("[ORCHESTRATOR] Final response generated")
 
         return state
 
@@ -157,7 +160,6 @@ class Orchestrator:
 
         builder.add_node("router", self.router_node)
 
-        # Add agent nodes
         for agent_name, agent in self.agents.items():
             builder.add_node(agent_name, self.create_agent_node(agent))
 
@@ -166,7 +168,6 @@ class Orchestrator:
         builder.set_entry_point("router")
 
         agent_names = self.agent_names
-
 
         def route_first_agent(state):
             plan = state.get("execution_plan", [])
@@ -182,7 +183,6 @@ class Orchestrator:
             route_first_agent,
             router_mapping
         )
-
 
         def route_next(state):
             plan = state.get("execution_plan", [])
@@ -206,7 +206,10 @@ class Orchestrator:
         builder.add_edge("final", END)
 
         self.graph = builder.compile()
-    
-    
+
+
     async def run(self, state: AgentState):
-        return await self.graph.ainvoke(state)
+        logger.info("[ORCHESTRATOR] Execution started")
+        result = await self.graph.ainvoke(state)
+        logger.info("[ORCHESTRATOR]  Execution completed")
+        return result

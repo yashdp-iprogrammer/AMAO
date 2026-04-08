@@ -71,6 +71,7 @@ def api_get_clients():
 
 def api_create_config(client_id, config):
     url = f"{BASE_URL}/configs/create-config-file/{client_id}"
+    print(config)
     res = requests.post(url, json=config, headers=get_headers())
     res.raise_for_status()
     return res.json()
@@ -249,7 +250,8 @@ def superadmin_ui():
 
 
         except Exception as e:
-            st.error(str(e))
+            import traceback
+            st.text(traceback.format_exc())
 
 
 # MAIN APP ROUTER
@@ -278,6 +280,7 @@ def main():
             st.session_state.logged_in = False
             st.session_state.token = None
             st.session_state.user_data = None
+            st.session_state.messages = []
             st.rerun()
 
     if is_super and mode == "Management":

@@ -6,6 +6,7 @@ from src.prompts.nosql_prompt import NOSQL_PROMPT
 from src.tools.nosql_search import run_nosql_query
 from src.Database.connection_manager import ConnectionManager
 from src.Database.schema_extractor.nosql_extractor import NoSQLSchemaExtractor
+from src.utils.logger import logger
 
 
 class NoSQLAgent(BaseAgent):
@@ -36,35 +37,22 @@ class NoSQLAgent(BaseAgent):
         for alias, conn_info in nosql_connections.items():
 
             cache_key = f"{client_id}_{alias}"
-
             cached = self._schema_cache.get(cache_key)
 
             if cached:
                 age = time.time() - cached["timestamp"]
 
                 if age < self._cache_ttl:
-                    print(f"[NOSQL SCHEMA] Cache hit for nosql_{alias}")
+                    logger.info(f"[NoSQLAgent] Schema cache hit for connection: {alias}")
                     schemas[alias] = cached["schema"]
                     continue
                 else:
-                    print(f"[SCHEMA] Cache expired for nosql_{alias}")
+                    logger.info(f"[NoSQLAgent] Schema cache expired for connection: {alias}")
 
-
-            print(f"[NOSQL SCHEMA] Cache miss for nosql_{alias}")
+            logger.info(f"[NoSQLAgent] Fetching schema for connection: {alias}")
 
             schema = await self.schema_extractor.extract_schema(conn_info)
 
-            # self._schema_cache[cache_key] = {
-            #     "schema": schema,
-            #     "timestamp": time.time()
-            # }
-
-            # schemas[alias] = {
-            #     "db_type": conn_info["db_type"],
-            #     "db_name": conn_info.get("db_name"),
-            #     "schema": schema
-            # }
-            
             full_schema = {
                 "db_type": conn_info["db_type"],
                 "db_name": conn_info.get("db_name"),
@@ -78,8 +66,6 @@ class NoSQLAgent(BaseAgent):
 
             schemas[alias] = full_schema
 
-        print("NoSQL schemas:\n", schemas)
-
         return schemas
 
     # -------------------------
@@ -90,20 +76,16 @@ class NoSQLAgent(BaseAgent):
         schema_text = ""
 
         for alias, schema in schemas.items():
-            
+
             db_type = schema.get("db_type")
 
             schema_text += f"\nConnection: {alias}\n"
             schema_text += f"Database Type: {db_type}\n"
 
-
             for key, value in schema.items():
-
                 schema_text += f"{key}: {value}\n"
 
-        print("Formatted NoSQL schemas:\n",schema_text)
         return schema_text
-
 
     # -------------------------
     # Generate queries
@@ -128,51 +110,52 @@ class NoSQLAgent(BaseAgent):
         response = await self.llm.ainvoke(prompt)
         raw = response.content.strip()
 
-        print("LLM Response for NoSQL Query:", raw)
+        logger.info(f"[NoSQLAgent] LLM response received for query generation:\n {raw}")
 
         try:
             parsed = json.loads(raw)
 
             if isinstance(parsed, dict):
-                return [parsed]  # single query
+                return [parsed]
 
             if isinstance(parsed, list):
-                return parsed  # multiple queries
+                return parsed
 
+            logger.warning("[NoSQLAgent] Unexpected LLM response format")
             return []
 
-        except Exception as e:
-            print("JSON Parse Error:", e)
+        except Exception:
+            logger.warning("[NoSQLAgent] Failed to parse LLM response as JSON")
             return []
 
     # -------------------------
     # Execute single query
     # -------------------------
     async def _execute_query(self, task, nosql_connections):
-        
+
         alias = task.get("connection_alias")
 
         if not alias:
+            logger.warning("[NoSQLAgent] Missing connection alias in task")
             return None
 
         conn_info = nosql_connections.get(alias)
 
         if not conn_info:
-            print(f"Invalid connection alias: {alias}")
+            logger.warning(f"[NoSQLAgent] Invalid connection alias: {alias}")
             return None
 
         try:
             rows = await run_nosql_query(task, conn_info)
-        except Exception as e:
-            print("NoSQL Execution Error:", e)
+        except Exception:
+            logger.exception(f"[NoSQLAgent] NoSQL query execution failed for connection: {alias}")
             return None
 
         return {
             "connection": alias,
-            "query": task, 
+            "query": task,
             "rows": rows
         }
-
 
     # -------------------------
     # Main run
@@ -180,12 +163,11 @@ class NoSQLAgent(BaseAgent):
     async def run(self, state):
 
         tasks = await self._generate_sub_queries(state)
-        
-        print("Generated NoSQL tasks:", tasks)
-        
+
+        logger.info(f"[NoSQLAgent] Generated {len(tasks)} NoSQL tasks")
+
         client_id = state["client_id"]
         current_user = state["current_user"]
-        
         connection_manager = state["connection_manager"]
 
         connections = connection_manager.get_client_connections(
@@ -194,8 +176,6 @@ class NoSQLAgent(BaseAgent):
         )
 
         nosql_connections = connections.get("nosql", {})
-
-        print(f"[NOSQL AGENT] Total tasks: {len(tasks)}")
 
         coroutines = [
             self._execute_query(task, nosql_connections)

@@ -10,21 +10,26 @@ from src.Database import system_db as db
 from typing import Annotated
 from src.Database.connection_manager import ConnectionManager 
 from src.security.o_auth import auth_dependency
-  
+from src.utils.logger import logger
+
 
 graph_manager = GraphManager()
 
 router = APIRouter(tags=["Chat"])
 
+
 def get_config_service(session: AsyncSession = Depends(db.get_session)) -> ConfigService:
     return ConfigService(session)
 
+
 config_session = Annotated[ConfigService, Depends(get_config_service)]
+
 
 def get_connection_manager(
     config_service: ConfigService = Depends(get_config_service)
 ):
     return ConnectionManager(config_service)
+
 
 @router.post("/chat")
 async def run_chat(
@@ -36,10 +41,15 @@ async def run_chat(
 ):
 
     client_id = current_user.client_id
+
+    logger.info(f"[ChatRoute] Incoming chat request for client_id={client_id}")
+
     vectordb = None
 
     config = config_service.read_config(client_id)
+
     if files:
+        logger.info(f"[ChatRoute] Processing {len(files)} uploaded files")
 
         rag_config = config["allowed_agents"].get("rag_agent")
 
@@ -53,7 +63,10 @@ async def run_chat(
 
                 document_name = file.filename
 
-                text_chunks = await document_processor.process_file(document_name,file)
+                text_chunks = await document_processor.process_file(
+                    document_name,
+                    file
+                )
 
                 vectordb.append_to_store(
                     client_id,
@@ -73,5 +86,9 @@ async def run_chat(
     }
 
     result = await orchestrator.run(state)
+
     result.pop("connection_manager", None)
+
+    logger.info(f"[ChatRoute] Chat request completed for client_id={client_id}")
+
     return result

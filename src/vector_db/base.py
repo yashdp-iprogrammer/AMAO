@@ -2,6 +2,7 @@ import os
 from abc import ABC, abstractmethod
 from src.settings.config import config
 from langchain_huggingface.embeddings import HuggingFaceEmbeddings
+from src.utils.logger import logger
 
 
 class BaseVectorStore(ABC):
@@ -14,7 +15,8 @@ class BaseVectorStore(ABC):
     def _get_embedding(self):
 
         if BaseVectorStore._embedding is None:
-            print("[VectorDB] Loading embedding model...")
+            logger.info(f"Loading embedding model: {config.EMBEDDING_MODEL}")
+            
             BaseVectorStore._embedding = HuggingFaceEmbeddings(
                 model_name=config.EMBEDDING_MODEL
             )

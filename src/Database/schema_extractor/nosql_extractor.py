@@ -1,8 +1,10 @@
+from src.utils.logger import logger
+
 class NoSQLSchemaExtractor:
     def __init__(self):
         self.EXTRACTOR_MAP = {
-        "mongodb": self._extract_mongo
-    }
+            "mongodb": self._extract_mongo
+        }
 
     async def extract_schema(self, conn_info):
 
@@ -10,12 +12,20 @@ class NoSQLSchemaExtractor:
         connection = conn_info["connection"]
 
         extractor = self.EXTRACTOR_MAP.get(db_type)
-        
+
+        if not extractor:
+            logger.warning(f"[NoSQLSchemaExtractor] Unsupported db_type: {db_type}")
+            return {"error": f"Unsupported db_type: {db_type}"}
+
+        logger.info(f"[NoSQLSchemaExtractor] Extracting schema for db_type: {db_type}")
+
         try:
             return await extractor(connection)
-        except Exception as e:
+
+        except Exception:
+            logger.exception(f"[NoSQLSchemaExtractor] Schema extraction failed for db_type: {db_type}")
             return {
-                "error": f"Schema extraction failed: {str(e)}"
+                "error": "Schema extraction failed"
             }
 
     # -------------------------

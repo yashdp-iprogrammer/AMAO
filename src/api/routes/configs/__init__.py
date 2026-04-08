@@ -5,7 +5,7 @@ from src.services.config_service import ConfigService
 from sqlmodel.ext.asyncio.session import AsyncSession
 from typing import Annotated
 from src.security.o_auth import auth_dependency
-
+from src.utils.logger import logger
 
 
 router = APIRouter(prefix="/configs", tags=["Configs"])
@@ -17,20 +17,54 @@ config_session = Annotated[ConfigService, Depends(get_config_service)]
 
 
 @router.post("/create-config-file/{client_id}")
-async def create_config_file(client_id: str, config: ConfigCreate, config_service: config_session, current_user = Depends(auth_dependency.require_roles(["SuperAdmin"]))):
-    return await config_service.create_config(client_id, config)
+async def create_config_file(
+    client_id: str,
+    config: ConfigCreate,
+    config_service: config_session,
+    current_user=Depends(auth_dependency.require_roles(["SuperAdmin"]))
+):
+    logger.info(f"[CREATE_CONFIG] user={current_user}, client_id={client_id}")
+
+    result = await config_service.create_config(client_id, config)
+
+    return result
 
 
 @router.put("/update-config-file/{client_id}")
-async def update_config_file(client_id: str, config: ConfigUpdate, config_service: config_session, current_user = Depends(auth_dependency.require_roles(["SuperAdmin"]))):
-    return config_service.update_config(client_id, config)
+async def update_config_file(
+    client_id: str,
+    config: ConfigUpdate,
+    config_service: config_session,
+    current_user=Depends(auth_dependency.require_roles(["SuperAdmin"]))
+):
+    logger.info(f"[UPDATE_CONFIG] user={current_user}, client_id={client_id}")
+
+    result = await config_service.update_config(client_id, config)
+
+    return result
 
 
 @router.delete("/remove-config-file/{client_id}")
-async def remove_config_file(client_id: str, config_service: config_session, current_user = Depends(auth_dependency.require_roles(["SuperAdmin"]))):
-    return config_service.remove_config(client_id)
+async def remove_config_file(
+    client_id: str,
+    config_service: config_session,
+    current_user=Depends(auth_dependency.require_roles(["SuperAdmin"]))
+):
+    logger.info(f"[DELETE_CONFIG] user={current_user}, client_id={client_id}")
+
+    result = await config_service.remove_config(client_id)
+
+    return result
 
 
 @router.get("/read-config/{client_id}")
-async def read_config(client_id: str, config_service: config_session, current_user = Depends(auth_dependency.require_roles(["SuperAdmin"]))):
-    return config_service.read_config(client_id)
+def read_config(
+    client_id: str,
+    config_service: config_session,
+    current_user=Depends(auth_dependency.require_roles(["SuperAdmin"]))
+):
+    logger.info(f"[READ_CONFIG] user={current_user}, client_id={client_id}")
+
+    result = config_service.read_config(client_id)
+
+    return result

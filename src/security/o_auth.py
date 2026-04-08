@@ -6,16 +6,12 @@ from datetime import datetime, timedelta, timezone
 from jose import jwt
 from jose.exceptions import JWTError
 
-# from src.Database.base_db import Database
 from src.Database.models import User, Role
 from src.security.dependencies import oauth2_scheme, invalidated_tokens
 from src.settings.config import config
-# from src.utils.hash_util import PasswordHandler
 from src.utils.logger import logger
 from src.schema.user_schema import CurrentUser
 from src.Database import system_db as db
-
-# password_handler = PasswordHandler()
 
 
 class AuthDependency:
@@ -29,7 +25,6 @@ class AuthDependency:
         self.secret_key = secret_key
         self.algorithm = algorithm
         self.access_token_expiry_time = int(access_token_expiry_time)
-        logger.info(f"Token expiry time: {self.access_token_expiry_time}")
 
     # ==========================
     # TOKEN CREATION
@@ -52,26 +47,6 @@ class AuthDependency:
             return None
 
     # ==========================
-    # AUTHENTICATE USER
-    # ==========================
-
-    # async def authenticate_user(
-    #     self, session: AsyncSession, username: str, password: str
-    # ) -> Optional[User]:
-
-    #     statement = select(User).where(User.user_name == username)
-    #     result = await session.exec(statement)
-    #     user = result.first()
-
-    #     if not user:
-    #         return None
-
-    #     if not password_handler.verify_password(password, user.user_password):
-    #         return None
-
-    #     return user
-
-    # ==========================
     # CURRENT USER (JWT → DB)
     # ==========================
 
@@ -82,6 +57,7 @@ class AuthDependency:
     ) -> CurrentUser:
 
         if token in invalidated_tokens:
+            logger.warning("Invalidated token used")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Token invalidated",
@@ -90,6 +66,7 @@ class AuthDependency:
         payload = self.decode_jwt_token(token)
 
         if not payload or "sub" not in payload:
+            logger.warning("Invalid or malformed JWT token")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token",
@@ -102,17 +79,18 @@ class AuthDependency:
         user = result.first()
 
         if not user:
+            logger.warning(f"User not found for token | user_id={user_id}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found",
             )
 
-        # Load role
         role_stmt = select(Role).where(Role.role_id == user.role_id)
         role_result = await session.exec(role_stmt)
         role = role_result.first()
 
         if not role:
+            logger.warning(f"Role not found | user_id={user_id}, role_id={user.role_id}")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Role not found",
@@ -138,6 +116,9 @@ class AuthDependency:
         ):
 
             if current_user.role_name not in allowed_roles:
+                logger.warning(
+                    f"Unauthorized role access | user_id={current_user.user_id}, role={current_user.role_name}"
+                )
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Operation not permitted for your role",

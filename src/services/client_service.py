@@ -17,14 +17,14 @@ class ClientService:
 
 
     async def create_client(self, client: ClientCreate) -> Client:
-        logger.info(f"Creating client: {client.client_name}")
+        logger.info(f"[CLIENT] Creating client: {client.client_name}")
 
         existing = await self.client_repo.get_client_by_email(client)
         if existing:
             raise HTTPException(status_code=400, detail="Client already exists")
-        
+
         hashed_password = self.hash_handler.get_password_hash(client.password)
-        
+
         client_dict = client.model_dump()
 
         client_dict["allowed_agents"] = {
@@ -45,6 +45,8 @@ class ClientService:
 
         created_client = await self.client_repo.create_client(client)
 
+        logger.info(f"[CLIENT] Client created successfully: {client.client_name}")
+
         return {
             "message": "Client created successfully",
             "client": created_client
@@ -52,6 +54,8 @@ class ClientService:
 
 
     async def update_client(self, client_id: str, client: ClientUpdate):
+        logger.info(f"[CLIENT] Updating client: {client_id}")
+
         existing_client = await self.client_repo.get_client_by_id(client_id)
 
         if not existing_client:
@@ -59,13 +63,17 @@ class ClientService:
 
         updated_client = await self.client_repo.update_client(existing_client, client)
 
+        logger.info(f"[CLIENT] Client updated successfully: {client_id}")
+
         return {
             "message": "Client updated successfully",
-             "client": updated_client
+            "client": updated_client
         }
 
 
     async def delete_client(self, client_id: str):
+        logger.info(f"[CLIENT] Deleting client: {client_id}")
+
         existing_client = await self.client_repo.get_client_by_id(client_id)
 
         if not existing_client:
@@ -73,17 +81,22 @@ class ClientService:
 
         await self.client_repo.delete_client(existing_client)
 
+        logger.info(f"[CLIENT] Client deleted successfully: {client_id}")
+
         return {"message": "Client deleted successfully"}
     
 
     async def get_all_clients(self, page: int, size: int):
+        logger.info(f"[CLIENT] Fetching all clients | page={page}, size={size}")
         return await self.client_repo.get_all_clients(page, size)
 
 
     async def get_client_by_id(self, client_id: str):
+        logger.info(f"[CLIENT] Fetching client by id: {client_id}")
         client = await self.client_repo.get_client_by_id(client_id)
 
         if not client:
+            logger.warning(f"[CLIENT] Client not found: {client_id}")
             raise HTTPException(status_code=404, detail="Client not found")
 
         return client

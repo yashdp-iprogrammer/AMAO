@@ -6,6 +6,7 @@ from src.schema.agent_schema import AgentCreate, AgentResponseList, AgentUpdate,
 from src.services.agent_service import AgentService
 from src.Database import system_db as db
 from src.security.o_auth import auth_dependency
+from src.utils.logger import logger
 
 router = APIRouter(prefix="/agents", tags=["Agents"])
 
@@ -22,6 +23,7 @@ async def create_agent(
     service: agent_session,
     current_user=Depends(auth_dependency.require_roles(["SuperAdmin"]))
 ):
+    logger.info(f"[CREATE_AGENT] user={current_user}, agent_name={agent.agent_name}{agent.agent_version}")
     return await service.create_agent(agent)
 
 
@@ -32,6 +34,7 @@ async def update_agent(
     service: agent_session,
     current_user=Depends(auth_dependency.require_roles(["SuperAdmin"]))
 ):
+    logger.info(f"[UPDATE_AGENT] user={current_user}, agent_id={agent_id}")
     return await service.update_agent(agent_id, agent)
 
 
@@ -41,6 +44,7 @@ async def delete_agent(
     service: agent_session,
     current_user=Depends(auth_dependency.require_roles(["SuperAdmin"]))
 ):
+    logger.info(f"[DELETE_AGENT] user={current_user}, agent_id={agent_id}")
     return await service.delete_agent(agent_id)
 
 
@@ -51,6 +55,7 @@ async def get_all_agents(
     size: int = Query(default=10, ge=1, le=100),
     current_user=Depends(auth_dependency.require_roles(["SuperAdmin", "Admin", "User"]))
 ):
+    logger.info(f"[LIST_AGENTS] user={current_user}, page={page}, size={size}")
     return await service.get_all_agents(page, size, current_user)
 
 
@@ -60,4 +65,5 @@ async def get_agent_by_id(
     service: agent_session,
     current_user=Depends(auth_dependency.require_roles(["SuperAdmin", "Admin", "User"]))
 ):
+    logger.info(f"[GET_AGENT] user={current_user}, agent_id={agent_id}")
     return await service.get_agent_by_id(agent_id, current_user)

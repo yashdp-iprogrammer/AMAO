@@ -1,13 +1,12 @@
-from src.Database.base_db import Database
 from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, Query
 from src.schema.user_schema import CurrentUser
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.services.feedback_service import FeedbackService
-from src.schema.feedback_schema import (FeedbackCreate, FeedbackRead,FeedbackUpdate,FeedbackResponse,FeedbackResponseList)
+from src.schema.feedback_schema import FeedbackCreate,FeedbackRead,FeedbackUpdate,FeedbackResponse,FeedbackResponseList
 from src.Database import system_db as db
 from src.security.o_auth import auth_dependency
-
+from src.utils.logger import logger
 
 
 router = APIRouter(prefix="/feedbacks", tags=["Feedbacks"])
@@ -27,6 +26,8 @@ async def add_feedback(
         auth_dependency.require_roles(["SuperAdmin", "Admin", "User"])
     )
 ):
+    logger.info(f"[CREATE_FEEDBACK] user={current_user}, payload={feedback.model_dump()}")
+
     return await service.create_feedback(feedback, current_user)
 
 
@@ -39,6 +40,8 @@ async def update_feedback(
         auth_dependency.require_roles(["SuperAdmin", "Admin", "User"])
     )
 ):
+    logger.info(f"[UPDATE_FEEDBACK] user={current_user}, feedback_id={feedback_id}")
+
     return await service.update_feedback(feedback_id, feedback, current_user)
 
 
@@ -50,6 +53,8 @@ async def delete_feedback(
         auth_dependency.require_roles(["SuperAdmin", "Admin", "User"])
     )
 ):
+    logger.info(f"[DELETE_FEEDBACK] user={current_user}, feedback_id={feedback_id}")
+
     return await service.delete_feedback(feedback_id, current_user)
 
 
@@ -63,6 +68,8 @@ async def list_feedback(
         auth_dependency.require_roles(["SuperAdmin", "Admin", "User"])
     )
 ):
+    logger.info(f"[LIST_FEEDBACK] user={current_user}, client_id={client_id}, page={page}, size={size}")
+
     return await service.get_all_feedback(current_user, client_id, page, size)
 
 
@@ -74,4 +81,6 @@ async def get_feedback_by_id(
         auth_dependency.require_roles(["SuperAdmin", "Admin", "User"])
     )
 ):
+    logger.info(f"[GET_FEEDBACK] user={current_user}, feedback_id={feedback_id}")
+
     return await service.get_feedback_by_id(feedback_id, current_user)

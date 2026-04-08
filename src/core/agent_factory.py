@@ -1,5 +1,6 @@
 from src.core.registry import AgentRegistry
 from src.core.llm_factory import LLMFactory
+from src.utils.logger import logger
 
 
 class AgentFactory:
@@ -9,6 +10,8 @@ class AgentFactory:
 
     def create_agents(self, agent_configs: dict):
 
+        logger.info(f"[AGENT FACTORY] Creating agents | count={len(agent_configs)}")
+
         agents = {}
 
         for agent_name, agent_conf in agent_configs.items():
@@ -16,7 +19,10 @@ class AgentFactory:
             agent_cls = self.registry.get(agent_name)
 
             if not agent_cls:
+                logger.warning(f"[AGENT FACTORY] Agent not registered: {agent_name}")
                 raise ValueError(f"Agent type '{agent_name}' not registered")
+
+            logger.info(f"[AGENT FACTORY] Initializing agent: {agent_name}")
 
             llm = LLMFactory.create({
                 "model_name": agent_conf["model_name"],
@@ -29,5 +35,7 @@ class AgentFactory:
                 config=agent_conf,
                 llm=llm
             )
+
+        logger.info("[AGENT FACTORY] Agent creation completed")
 
         return agents

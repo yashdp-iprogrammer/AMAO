@@ -2,6 +2,8 @@ from typing import Dict, Type
 from src.agents.sql_agent import SQLAgent
 from src.agents.rag_agent import RAGAgent
 from src.agents.nosql_agent import NoSQLAgent
+from src.utils.logger import logger
+
 
 class AgentRegistry:
 
@@ -17,7 +19,8 @@ class AgentRegistry:
 
    
     def register(self, agent_type: str, agent_cls: Type):
-        if agent_type in self._registry:    
+        if agent_type in self._registry:
+            logger.warning(f"[REGISTRY] Duplicate agent registration attempted: {agent_type}")
             raise ValueError(f"Agent '{agent_type}' already registered")
 
         self._registry[agent_type] = agent_cls
@@ -26,6 +29,7 @@ class AgentRegistry:
     def get(self, agent_type: str):
 
         if agent_type not in self._registry:
+            logger.warning(f"[REGISTRY] Requested unregistered agent: {agent_type}")
             raise ValueError(
                 f"Agent type '{agent_type}' not registered. "
                 f"Available: {list(self._registry.keys())}"

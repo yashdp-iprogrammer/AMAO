@@ -11,7 +11,7 @@ from src.repositories.client_repository import ClientRepo
 
 class ConfigService:
 
-    def __init__(self, session:AsyncSession, base_dir: str = "src/configs"):
+    def __init__(self, session: AsyncSession, base_dir: str = "src/configs"):
         self.session = session
         self.agent_repo = AgentRepo(session)
         self.model_repo = ModelRepo(session)
@@ -26,57 +26,33 @@ class ConfigService:
 
 
     def _ensure_client_dir(self, client_id: str):
-        # Perform the creation action here
         client_dir = os.path.join(self.base_dir, f"client_id_{client_id}")
         os.makedirs(client_dir, exist_ok=True)
-    
-    
+
+
     def read_config(self, client_id: str):
         if client_id in self._config_cache:
-            logger.info(f"Loaded config for client {client_id} from cache")
+            logger.info(f"[CONFIG] Cache hit for client {client_id}")
             return self._config_cache[client_id]
 
         config_path = self._get_client_config_path(client_id)
-        
+
         try:
             with open(config_path, "r") as f:
-                logger.info(f"Loaded config for client {client_id} from disk")
                 config = yaml.safe_load(f) or {}
+                logger.info(f"[CONFIG] Loaded config from disk for client {client_id}")
         except FileNotFoundError:
+            logger.warning(f"[CONFIG] Config not found for client {client_id}")
             raise HTTPException(status_code=404, detail="Config file not found")
-
 
         self._config_cache[client_id] = config
         return config
 
 
-    # def create_config(self, client_id: str, config: ClientConfigCreate):
-
-    #     config_path = self._get_client_config_path(client_id)
-
-    #     if os.path.exists(config_path):
-    #         raise HTTPException(status_code=400, detail="Config file already exists")
-
-    #     self._ensure_client_dir(client_id)
-
-    #     config_dict = config.model_dump(exclude_none=True)
-
-    #     with open(config_path, "w") as f:
-    #         logger.info(f"Creating config for client {client_id}")
-    #         yaml.safe_dump(config_dict, f, sort_keys=False)
-            
-    #     self._config_cache[client_id] = config_dict
-
-    #     return {"message": "Config file created successfully"}
-    
-
     async def create_config(self, client_id: str, config: ConfigCreate):
+        logger.info(f"[CONFIG] Creating config for client {client_id}")
 
         config_path = self._get_client_config_path(client_id)
-
-        # if os.path.exists(config_path):
-        #     raise HTTPException(status_code=400, detail="Config file already exists")
-
         self._ensure_client_dir(client_id)
 
         agents_data = {}
@@ -84,18 +60,22 @@ class ConfigService:
 
         for agent_name, agent in config.allowed_agents.items():
 
+            logger.info(f"[CONFIG] Validating agent {agent_name}:{agent.agent_version}")
+
             agent_info = await self.agent_repo.get_agent_by_version(agent_name, agent.agent_version)
+
             if not agent_info:
+                logger.warning(f"[CONFIG] Invalid agent/version: {agent_name}:{agent.agent_version}")
                 raise HTTPException(
                     status_code=400,
                     detail=f"Invalid agent/version: {agent_name} ({agent.agent_version})"
                 )
-                
+
             model_info = await self.model_repo.get_model_by_id(agent_info.model_id)
 
             agent_dict = {
                 "agent_id": agent_info.agent_id,
-                "version": agent_info.agent_version,
+                "agent_version": agent_info.agent_version,
                 "enabled": True,
                 "model_name": model_info.model_name,
                 "temperature": getattr(agent_info, "temperature", 0),
@@ -121,58 +101,43 @@ class ConfigService:
             "allowed_agents": agents_data
         }
 
-            
+        logger.info(f"[CONFIG] Validating client existence: {client_id}")
+
         existing_client = await self.client_repo.get_client_by_id(client_id)
         if not existing_client:
+            logger.warning(f"[CONFIG] Client not found: {client_id}")
             raise HTTPException(status_code=404, detail="Client not found")
 
         update_payload = ClientUpdate(allowed_agents=db_agents_data)
+
         await self.client_repo.update_client(existing_client, update_payload)
-        
+        logger.info(f"[CONFIG] Updated allowed_agents in DB for client {client_id}")
+
         with open(config_path, "w") as f:
-            logger.info(f"Creating config for client {client_id}")
             yaml.safe_dump(config_dict, f, sort_keys=False)
-        
+
+        logger.info(f"[CONFIG] Config file created successfully for client {client_id}")
+
         self._config_cache[client_id] = config_dict
 
         return {"message": "Config file created successfully"}
 
-    
-    # def update_config(self, client_id: str, config: ConfigUpdate):
 
-    #     config_path = self._get_client_config_path(client_id)
-
-    #     try:
-    #         with open(config_path, "r") as f:
-    #             logger.info(f"Updating config for client {client_id}")
-    #             existing_config = yaml.safe_load(f) or {}
-    #     except FileNotFoundError:
-    #         raise HTTPException(status_code=404, detail="Config file not found")
-
-    #     update_data = config.model_dump(exclude_none=True)
-
-    #     existing_config.update(update_data)
-
-    #     with open(config_path, "w") as f:
-    #         yaml.safe_dump(existing_config, f, sort_keys=False)
-            
-    #     self._config_cache[client_id] = existing_config
-    #     self._db_cache.pop(client_id, None)
-
-    #     return {"message": "Config file updated successfully"}
-    
-    
     def remove_config(self, client_id: str):
+
+        logger.info(f"[CONFIG] Removing config for client {client_id}")
 
         config_path = self._get_client_config_path(client_id)
 
         try:
             os.remove(config_path)
-            logger.info(f"Deleting config for client {client_id}")
         except FileNotFoundError:
+            logger.warning(f"[CONFIG] Config file not found for deletion: {client_id}")
             raise HTTPException(status_code=404, detail="Config file not found")
 
         self._config_cache.pop(client_id, None)
         self._db_cache.pop(client_id, None)
+
+        logger.info(f"[CONFIG] Config removed successfully for client {client_id}")
 
         return {"message": "Config file removed successfully"}
