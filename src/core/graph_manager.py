@@ -54,7 +54,6 @@ class GraphManager:
             llm = LLMFactory.create(first_enabled_config)
 
             orchestrator = Orchestrator(agents, llm)
-            orchestrator.build_graph()
 
             self._cache[client_id] = orchestrator
 

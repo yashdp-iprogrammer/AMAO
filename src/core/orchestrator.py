@@ -6,6 +6,7 @@ from src.core.state_manager import AgentState
 from src.prompts.router_prompt import ROUTER_PROMPT
 from src.prompts.final_prompt import FINAL_PROMPT
 from src.utils.logger import logger
+import asyncio
 
 
 class Orchestrator:
@@ -19,6 +20,7 @@ class Orchestrator:
         self.agents = agents
         self.agent_names = list(self.agents.keys())
         self.agent_name_set = set(self.agent_names)
+        self.max_steps = min(len(self.agent_names) * 2, 20)
         self.llm = llm
 
         logger.info(f"[ORCHESTRATOR] Initialized | agents={self.agent_names}")
@@ -86,26 +88,52 @@ class Orchestrator:
 
         state["execution_plan"] = filtered_plan
         state["execution_index"] = 0
-        state["execution_trace"] = state.get("execution_trace", []) + ["router"]
+        trace = state.get("execution_trace") or []
+        trace.append("router")
+        state["execution_trace"] = trace
 
         return state
 
-
+    
     def create_agent_node(self, agent):
 
         async def node(state: AgentState):
 
             current_index = state.get("execution_index", 0)
-            plan = state.get("execution_plan", [])
+            plan = state.get("execution_plan") or []
 
             if current_index >= len(plan):
                 return state
 
-            logger.info(f"[ORCHESTRATOR] Executing agent | name={agent.name}, step={current_index}")
+            trace = state.get("execution_trace") or []
 
-            result = await agent.run(state)
+            if trace and trace[-1] == agent.name:
+                logger.warning(
+                    f"[ORCHESTRATOR] Detected repeated agent execution: {agent.name}, skipping"
+                )
+                state["execution_index"] = current_index + 1
+                return state
+            
+            if len(trace) >= 4 and trace[-2:] == trace[-4:-2]:
+                logger.warning(
+                    f"[ORCHESTRATOR] Oscillation loop detected: {trace[-4:]}, skipping"
+                )
+                state["execution_index"] = current_index + 1
+                return state
+            
+            logger.info(
+                f"[ORCHESTRATOR] Executing agent | name={agent.name}, step={current_index}"
+            )
 
-            trace = state.get("execution_trace", [])
+            try:
+                result = await asyncio.wait_for(agent.run(state), timeout=15)
+            except asyncio.TimeoutError:
+                logger.error(f"[ORCHESTRATOR] Agent timeout: {agent.name}")
+                result = {}
+            except Exception as e:
+                logger.error(f"[ORCHESTRATOR] Agent failed: {agent.name} | error={str(e)}")
+                result = {}
+
             trace.append(agent.name)
 
             state.update(result)
@@ -138,6 +166,14 @@ class Orchestrator:
             logger.info("[ORCHESTRATOR] No data found for final response generation")
             state["final_response"] = "No relevant data found for the query."
             return state
+        
+        MAX_CONTEXT_ITEMS = 20
+
+        if len(structured_context) > MAX_CONTEXT_ITEMS:
+            logger.warning(
+                f"[ORCHESTRATOR] Context too large ({len(structured_context)}), trimming to last {MAX_CONTEXT_ITEMS}"
+            )
+            structured_context = structured_context[-MAX_CONTEXT_ITEMS:]
 
         logger.info(f"[ORCHESTRATOR] Generating final response | context_size={len(structured_context)}")
 
@@ -188,6 +224,10 @@ class Orchestrator:
             plan = state.get("execution_plan", [])
             index = state.get("execution_index", 0)
 
+            if index >= self.max_steps:
+                logger.warning(f"[ORCHESTRATOR] Max steps reached ({self.max_steps}), terminating execution")
+                return "final"
+          
             if index < len(plan):
                 return plan[index]["agent"]
 
@@ -205,7 +245,7 @@ class Orchestrator:
 
         builder.add_edge("final", END)
 
-        self.graph = builder.compile()
+        return builder.compile()
 
 
     async def run(self, state: AgentState):
