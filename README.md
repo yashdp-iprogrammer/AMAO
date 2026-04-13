@@ -1,6 +1,6 @@
 # AMAO — Adaptive Multi-Agent Orchestration
 
-A **config-driven** multi-agent AI backend that accepts natural language queries, intelligently distributes them across SQL, NoSQL, and RAG agents, and synthesises all results into a single coherent answer — powered by a LangGraph orchestration pipeline, served via FastAPI with a Streamlit frontend.
+A **config-driven** multi-agent AI backend that accepts natural language queries, intelligently distributes them across SQL, NoSQL, and RAG agents, and synthesises all results into a single coherent answer — powered by a LangGraph orchestration pipeline, served via FastAPI with a Streamlit frontend. The agent registry is extensible, allowing new agent types to be added as your requirements grow.
 
 The key principle: **every client gets exactly the agents they need, nothing more.** Agent availability, database connections, LLM models, and vector store backends are all defined per-client in a single `config.yaml` file.
 
@@ -236,19 +236,57 @@ Collects `sql_agent_results`, `nosql_agent_results`, and `rag_agent_results` fro
 ## Vector Store & RAG
 
 ### Document Ingestion
-Upload PDFs or `.txt` files via the chat endpoint. The `DocumentProcessor` (PyMuPDF):
-- Sorts blocks by vertical position per page.
-- Detects and prefixes headings to their associated paragraphs.
-- Detects reference sections (`References`, `Bibliography`, etc.) and stops ingestion there.
-- Filters copyright notices and standalone page numbers.
-- SHA-256 hashes each chunk for deduplication.
+Upload PDFs or `.txt` files via the chat endpoint. The `DocumentProcessor` handles ingestion in two stages.
 
-### Incremental Indexing
-Both FAISS and ChromaDB stores use the same diff strategy:
-- **Same filename re-uploaded** → diff old vs new hashes, delete removed chunks, add new chunks.
-- **New filename** → check against all existing IDs in the index, skip duplicates, add only truly new chunks.
+**Stage 1 — File-level deduplication (OCR files only)**
 
-Re-uploading an unchanged document is a no-op.
+Before any parsing begins, the entire file is SHA-256 hashed and checked against a per-client `file_hashes.json` store. If the hash already exists, the file is skipped immediately — no parsing, no OCR, no embedding. This short-circuit exists specifically for scanned/image-based PDFs: because OCR is expensive and its output cannot be chunk-diffed reliably, the whole-file hash is used as the dedup key. After a successful OCR ingestion the file hash is written to `file_hashes.json`. Native text PDFs do not use file-level hashing — they go straight to chunk-level diffing instead.
+
+**Stage 2 — Parsing & chunking (PyMuPDF)**
+
+For files that pass the file-level check (or all native-text PDFs):
+- Blocks are sorted by vertical position per page.
+- Headings are detected (short text, large vertical gap, no trailing period) and prepended to the paragraph that follows them.
+- Reference sections (`References`, `Bibliography`, `Works Cited`, etc.) are detected and ingestion stops there — bibliography entries are never embedded.
+- Copyright notices and standalone page numbers are filtered out.
+- Each extracted chunk is SHA-256 hashed for chunk-level deduplication (see below).
+
+**OCR Fallback**
+
+On each page, the raw text is first evaluated by a scoring engine before deciding whether to use PyMuPDF's native extraction or fall back to OCR (pytesseract + pdf2image). The engine scores the page across four signals:
+
+| Signal | Condition | Score |
+|--------|-----------|-------|
+| Text length | Fewer than 30 characters | +2 |
+| Noise ratio | More than 30% non-alphanumeric characters | +1 |
+| Word quality | Fewer than 50% valid alphabetic words | +1 |
+| Avg word length | Average word shorter than 3 characters | +1 |
+
+A score of 2 or above triggers OCR on that page. Pages that pass native extraction continue through the normal paragraph-building pipeline. This means scanned PDFs and mixed documents (some native, some image-based pages) are handled automatically without any manual configuration.
+
+### Incremental Indexing & Deduplication
+
+Every paragraph chunk is SHA-256 hashed before embedding. The hash serves as the vector ID in both FAISS and ChromaDB, enabling two distinct deduplication strategies depending on how the file arrives:
+
+**Case 1 — Same filename re-uploaded**
+
+The store compares the new hash set against the `.hashes` file saved from the previous ingestion of that document:
+- Chunks present in the old file but absent in the new one are **deleted** from the index.
+- Chunks present in the new file but absent in the old one are **added** as new embeddings.
+- Chunks present in both are **skipped entirely** — no re-embedding, no duplication.
+- If the sets are identical, the entire operation is a no-op: `"No changes detected"`.
+
+This means uploading a document with minor edits only re-embeds the paragraphs that actually changed.
+
+**Case 2 — Same content, different filename**
+
+If no `.hashes` file exists for the incoming filename, the store checks the new chunk hashes directly against all existing vector IDs in the index:
+- Chunks whose hashes already exist in the index are **skipped**.
+- Only genuinely new chunks are embedded and added.
+
+This prevents duplicate embeddings even when the same document (or overlapping content) is uploaded under a different name.
+
+Both FAISS and ChromaDB implement identical diffing logic. After every successful ingestion the `.hashes` file is written (or overwritten) with the current `{ hash: text }` map for that document.
 
 ### Storage Layout
 ```
@@ -257,10 +295,12 @@ src/vector_stores/
     ├── faiss/
     │   ├── index.faiss
     │   ├── index.pkl
+    │   ├── file_hashes.json             # File-level: { file_sha256: document_name }
     │   └── hashes/
-    │       └── <document_name>.hashes   # JSON: { sha256_hash: paragraph_text }
+    │       └── <document_name>.hashes   # Chunk-level: { chunk_sha256: paragraph_text }
     └── chroma/
         ├── chroma.sqlite3
+        ├── file_hashes.json
         └── hashes/
             └── <document_name>.hashes
 ```
@@ -469,8 +509,8 @@ The API key is read from the agent's `api_key` field first, then falls back to `
 ### Install
 
 ```bash
-git clone https://github.com/your-org/amao.git
-cd amao
+git clone https://github.com/yashdp-iprogrammer/AMAO.git
+cd AMAO
 
 # With uv
 uv sync
@@ -518,7 +558,7 @@ In the Assistant view, expand **Upload & Index Knowledge**, upload PDFs or `.txt
 | SQL databases | MySQL, PostgreSQL, SQLite, MariaDB, MSSQL (all async) |
 | NoSQL databases | MongoDB (Motor — async) |
 | System ORM | SQLModel + async SQLAlchemy |
-| PDF processing | PyMuPDF |
+| PDF processing | PyMuPDF + pytesseract + pdf2image (OCR fallback) |
 | Auth | JWT (python-jose) + passlib (argon2) |
 | Frontend | Streamlit |
 | Package manager | uv |

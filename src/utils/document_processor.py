@@ -1,25 +1,62 @@
 import os
 import re
+import json
 import hashlib
 import pymupdf
+import pytesseract
+from pdf2image import convert_from_path
 from tempfile import NamedTemporaryFile
+from src.utils.logger import logger
+
 
 class DocumentProcessor:
 
-    def _clean_text(self, text: str):
-        """Removes internal newlines and extra whitespace for hash stability."""
-        # Replace newlines with spaces, then collapse multiple spaces into one
-        return " ".join(text.replace("\n", " ").split()).strip()
+    # ---------------- HASH STORE HELPERS ---------------- #
 
+    def _get_hash_store_path(self, client_id: str, vector_db: str):
+        return f"src/vector_stores/client_id_{client_id}/{vector_db}/file_hashes.json"
+
+    def _load_hash_store(self, client_id: str, vector_db: str):
+        logger.info(f"Loading hash store for client={client_id}, db={vector_db}")
+        path = self._get_hash_store_path(client_id, vector_db)
+
+        if not os.path.exists(path):
+            return {}
+
+        try:
+            with open(path, "r") as f:
+                content = f.read().strip()
+                return json.loads(content) if content else {}
+        except json.JSONDecodeError:
+            logger.warning("Corrupted hash store. Resetting...")
+            return {}
+
+    def _save_hash_store(self, client_id: str, vector_db: str, data: dict):
+        logger.info(f"Saving hash store for client={client_id}, db={vector_db}")
+        path = self._get_hash_store_path(client_id, vector_db)
+
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        temp_path = path + ".tmp"
+
+        with open(temp_path, "w") as f:
+            json.dump(data, f)
+
+        os.replace(temp_path, path)
+
+    def _compute_file_hash(self, file_bytes: bytes):
+        return hashlib.sha256(file_bytes).hexdigest()
+
+    # ---------------- TEXT HELPERS ---------------- #
+
+    def _clean_text(self, text: str):
+        return " ".join(text.replace("\n", " ").split()).strip()
 
     def _hash_paragraph(self, document_name: str, paragraph: str):
         return hashlib.sha256(paragraph.encode()).hexdigest()
-    
-    
-    def _is_reference_heading(self, text: str):
-        """Detects headings like 'References', 'Bibliography', etc."""
-        text = text.lower().strip()
 
+    def _is_reference_heading(self, text: str):
+        text = text.lower().strip()
         return text in [
             "references",
             "bibliography",
@@ -28,40 +65,131 @@ class DocumentProcessor:
             "literature cited"
         ]
 
-
     def _looks_like_reference(self, text: str):
-        """Detects numbered bibliography entries."""
-
         text = text.strip()
 
-        # [1] Author ...
         if re.match(r"^\[\d+\]\s+", text):
             return True
-
-        # 1. Author ...
         if re.match(r"^\d+\.\s+[A-Z]", text):
             return True
-
-        # 1) Author ...
         if re.match(r"^\d+\)\s+[A-Z]", text):
             return True
 
         return False
+
+    # ---------------- OCR ---------------- #
+
+    def _ocr_page(self, file_path: str, page_number: int):
+        logger.info(f"OCR processing page {page_number}")
+        images = convert_from_path(
+            file_path,
+            first_page=page_number,
+            last_page=page_number
+        )
+        return pytesseract.image_to_string(images[0])
+
     
+    def _is_low_text(self, text: str, page_number: int = None) -> bool:
+        """
+        Production-grade OCR decision engine.
+        Returns True → OCR needed
+        """
 
-    async def process_file(self, document_name: str, file):
+        if not text:
+            logger.info(f"Page {page_number}: Empty text → OCR")
+            return True
+
+        text = text.strip()
+
+        score = 0
+        reasons = []
+
+        # ---------------- SIGNAL 1: TEXT LENGTH ---------------- #
+        if len(text) < 30:
+            score += 2
+            reasons.append("LOW_TEXT")
+
+        # ---------------- SIGNAL 2: WEIRD CHAR RATIO ---------------- #
+        weird_chars = sum(
+            1 for c in text if not c.isalnum() and not c.isspace()
+        )
+        weird_ratio = weird_chars / max(len(text), 1)
+
+        if weird_ratio > 0.3:
+            score += 1
+            reasons.append("HIGH_NOISE")
+
+        # ---------------- SIGNAL 3: WORD QUALITY ---------------- #
+        words = text.split()
+        valid_words = [w for w in words if w.isalpha() and len(w) > 2]
+
+        word_ratio = len(valid_words) / max(len(words), 1)
+
+        if word_ratio < 0.5:
+            score += 1
+            reasons.append("LOW_WORD_QUALITY")
+
+        # ---------------- SIGNAL 4: AVG WORD LENGTH ---------------- #
+        avg_word_len = (
+            sum(len(w) for w in words) / max(len(words), 1)
+            if words else 0
+        )
+
+        if avg_word_len < 3:
+            score += 1
+            reasons.append("SHORT_WORDS")
+
+        # ---------------- FINAL DECISION ---------------- #
+        needs_ocr = score >= 2
+
+        logger.info({
+            "page": page_number,
+            "ocr": needs_ocr,
+            "score": score,
+            "reasons": reasons,
+            "text_length": len(text),
+            "weird_ratio": round(weird_ratio, 3),
+            "word_ratio": round(word_ratio, 3),
+            "avg_word_len": round(avg_word_len, 2)
+        })
+
+        return needs_ocr
+
+    # ---------------- MAIN ---------------- #
+
+    async def process_file(self, client_id: str, vector_db: str, document_name: str, file):
+
         filename = file.filename.lower()
-        results = []
+        logger.info(f"Processing file: {document_name} for client: {client_id}")
 
+        file_bytes = await file.read()
+
+        # ⚠️ Reset pointer for downstream use
+        file.file.seek(0)
+
+        file_hashes = self._load_hash_store(client_id, vector_db)
+
+        file_hash = self._compute_file_hash(file_bytes)
+
+        if file_hash in file_hashes:
+            logger.info(f"Skipping already processed file: {document_name}")
+            return None
+
+        results = []
+        ocr_used = False
+
+        # ---------------- TXT ---------------- #
         if filename.endswith(".txt"):
-            content = await file.read()
+            logger.info(f"TXT file detected: {document_name}")
+
             try:
-                text = content.decode("utf-8")
+                text = file_bytes.decode("utf-8")
             except UnicodeDecodeError:
-                text = content.decode("latin-1")
-            
-            # For TXT, we still rely on double newlines as the "block" separator
+                logger.warning(f"UTF-8 decode failed, using latin-1 for {document_name}")
+                text = file_bytes.decode("latin-1")
+
             paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+
             for para in paragraphs:
                 clean_para = self._clean_text(para)
                 results.append({
@@ -69,27 +197,50 @@ class DocumentProcessor:
                     "hash": self._hash_paragraph(document_name, clean_para)
                 })
 
-        
+        # ---------------- PDF ---------------- #
         elif filename.endswith(".pdf"):
+            logger.info(f"PDF file detected: {document_name}")
 
             with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(await file.read())
+                tmp.write(file_bytes)
                 tmp_path = tmp.name
-            
+
             try:
                 doc = pymupdf.open(tmp_path)
 
                 current_heading = None
-                
                 reference_heading_seen = False
                 reference_streak = 0
                 REFERENCE_THRESHOLD = 3
 
-                for page in doc:
+                for page_index, page in enumerate(doc, start=1):
+                    logger.info(f"Processing page {page_index} of {document_name}")
+
+                    raw_text = page.get_text()
+
+                    # 🔥 OCR FALLBACK
+                    if self._is_low_text(raw_text, page_index):
+                        ocr_used = True
+                        logger.info(f"OCR applied on page {page_index} for {document_name}")
+
+                        ocr_text = self._ocr_page(tmp_path, page_index)
+
+                        paragraphs = [
+                            p.strip() for p in ocr_text.split("\n\n") if p.strip()
+                        ]
+
+                        for para in paragraphs:
+                            clean_para = self._clean_text(para)
+                            results.append({
+                                "text": clean_para,
+                                "hash": self._hash_paragraph(document_name, clean_para)
+                            })
+
+                        continue
+
+                    # ---------------- NORMAL PIPELINE ---------------- #
 
                     blocks = page.get_text("blocks")
-
-                    # sort blocks by vertical position
                     blocks = sorted(blocks, key=lambda b: (b[1], b[0]))
 
                     paragraph_buffer = ""
@@ -104,23 +255,18 @@ class DocumentProcessor:
 
                         text = text.strip()
 
-                        if len(text) < 5:
-                            continue
-                        
-                        if "©" in text:
+                        if len(text) < 5 or "©" in text:
                             continue
 
                         clean_text = self._clean_text(text)
-                        
-                        # ---------- REFERENCE HEADING DETECTION ----------
 
+                        # REFERENCES
                         if self._is_reference_heading(clean_text):
+                            logger.info(f"Reference section started in {document_name}")
                             reference_heading_seen = True
                             reference_streak = 0
                             paragraph_buffer = ""
                             continue
-                        
-                        # ---------- REFERENCE ENTRY DETECTION ----------
 
                         if reference_heading_seen:
 
@@ -130,20 +276,20 @@ class DocumentProcessor:
                                 reference_streak = 0
 
                             if reference_streak >= REFERENCE_THRESHOLD:
-                                print("Reference section detected. Stopping ingestion.")
+                                logger.info(f"Reference section detected, stopping ingestion for {document_name}")
                                 break
 
-                        # ---------- REMOVE PAGE NUMBERS ----------
+                        # PAGE NUMBERS
                         if re.match(r"^(page\s*\d+|\d+)$", clean_text.lower()):
                             continue
 
-                        # calculate vertical gap first
+                        # GAP
                         if prev_bottom is None:
                             vertical_gap = 0
                         else:
                             vertical_gap = y0 - prev_bottom
 
-                        # ---------- HEADING DETECTION ----------
+                        # HEADING
                         is_heading = (
                             len(clean_text.split()) <= 6
                             and len(clean_text) < 60
@@ -155,7 +301,7 @@ class DocumentProcessor:
                             current_heading = clean_text
                             continue
 
-                        # ---------- PARAGRAPH BUILDING ----------
+                        # PARAGRAPH
                         if prev_bottom is None:
                             paragraph_buffer = clean_text
                             prev_bottom = y1
@@ -166,10 +312,10 @@ class DocumentProcessor:
                         if vertical_gap > 10:
 
                             clean_para = self._clean_text(paragraph_buffer)
-                            
+
                             if current_heading:
                                 final_text = f"{current_heading}: {clean_para}"
-                                current_heading = None  # reset after using
+                                current_heading = None
                             else:
                                 final_text = clean_para
 
@@ -178,15 +324,12 @@ class DocumentProcessor:
                                 "hash": self._hash_paragraph(document_name, final_text)
                             })
 
-                            print("clean doc", final_text)
-
                             paragraph_buffer = clean_text
 
                         else:
                             paragraph_buffer += " " + clean_text
 
                         prev_bottom = y1
-
 
                     if paragraph_buffer and reference_streak < REFERENCE_THRESHOLD:
 
@@ -202,8 +345,6 @@ class DocumentProcessor:
                             "hash": self._hash_paragraph(document_name, final_text)
                         })
 
-                        print("clean doc", final_text)
-                        
                     if reference_streak >= REFERENCE_THRESHOLD:
                         break
 
@@ -214,9 +355,19 @@ class DocumentProcessor:
                     os.remove(tmp_path)
 
         else:
+            logger.warning(f"Unsupported file type: {document_name}")
             raise ValueError("Unsupported file type")
 
+        if ocr_used:
+            logger.info(f"Storing hash (OCR file): {document_name}")
+            file_hashes[file_hash] = document_name
+            self._save_hash_store(client_id, vector_db, file_hashes)
+        else:
+            logger.info(f"Skipping hash store (non-OCR file): {document_name}")
+
+        logger.info(f"Completed processing file: {document_name}, chunks: {len(results)}")
+
         return results
-    
-    
+
+
 document_processor = DocumentProcessor()

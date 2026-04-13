@@ -33,6 +33,10 @@ class FaissVectorStore(BaseVectorStore):
         faiss_path, docs_path = self._get_vector_path(client_id)
         hash_path = os.path.join(docs_path, f"{document_name}.hashes")
 
+        if paragraphs is None:
+            logger.info("[FAISS] Skipping update (file already processed)")
+            return "File already processed"
+
         new_hash_map = {p["hash"]: p["text"] for p in paragraphs}
         new_hashes = set(new_hash_map.keys())
 

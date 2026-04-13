@@ -55,18 +55,28 @@ async def run_chat(
 
         if rag_config and rag_config.get("enabled"):
 
-            vectordb = VectorDBService(
-                rag_config.get("vector_db", "faiss")
-            )
+            vector_db_type = rag_config.get("vector_db", "faiss")
+
+            vectordb = VectorDBService(vector_db_type)
 
             for file in files:
 
                 document_name = file.filename
 
                 text_chunks = await document_processor.process_file(
+                    client_id,
+                    vector_db_type,
                     document_name,
                     file
                 )
+
+                if text_chunks is None:
+                    logger.info(f"[ChatRoute] Skipping already processed file: {document_name}")
+                    continue
+
+                if not text_chunks:
+                    logger.warning(f"[ChatRoute] No chunks extracted from file: {document_name}")
+                    continue
 
                 vectordb.append_to_store(
                     client_id,
