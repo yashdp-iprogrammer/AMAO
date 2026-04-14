@@ -1,6 +1,11 @@
 import os
 import yaml
+import asyncio
+import tempfile
+from cachetools import TTLCache
+from collections import defaultdict
 from fastapi import HTTPException
+
 from src.utils.logger import logger
 from sqlmodel.ext.asyncio.session import AsyncSession
 from src.schema.config_schema import ConfigCreate
@@ -9,7 +14,18 @@ from src.repositories.agent_repository import AgentRepo
 from src.repositories.model_repository import ModelRepo
 from src.repositories.client_repository import ClientRepo
 
+
 class ConfigService:
+
+    # -------------------------
+    # CACHE
+    # -------------------------
+    _config_cache = TTLCache(maxsize=200, ttl=1800)
+
+    # -------------------------
+    # PER CLIENT LOCKS
+    # -------------------------
+    _client_locks = defaultdict(asyncio.Lock)
 
     def __init__(self, session: AsyncSession, base_dir: str = "src/configs"):
         self.session = session
@@ -17,23 +33,22 @@ class ConfigService:
         self.model_repo = ModelRepo(session)
         self.client_repo = ClientRepo(session)
         self.base_dir = os.path.abspath(base_dir)
-        self._config_cache = {}
-        self._db_cache = {}
-        
-        
+
     def _get_client_config_path(self, client_id: str):
         return os.path.join(self.base_dir, f"client_id_{client_id}", "config.yaml")
 
-
     def _ensure_client_dir(self, client_id: str):
-        client_dir = os.path.join(self.base_dir, f"client_id_{client_id}")
-        os.makedirs(client_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(self._get_client_config_path(client_id)), exist_ok=True)
 
-
+    # -------------------------
+    # READ CONFIG
+    # -------------------------
     def read_config(self, client_id: str):
-        if client_id in self._config_cache:
-            logger.info(f"[CONFIG] Cache hit for client {client_id}")
-            return self._config_cache[client_id]
+
+        cached = self._config_cache.get(client_id)
+        if cached:
+            logger.info(f"[CONFIG] Cache hit | client_id={client_id}")
+            return cached
 
         config_path = self._get_client_config_path(client_id)
 
@@ -44,100 +59,136 @@ class ConfigService:
         except FileNotFoundError:
             logger.warning(f"[CONFIG] Config not found for client {client_id}")
             raise HTTPException(status_code=404, detail="Config file not found")
+        except Exception:
+            logger.exception("[CONFIG] Failed to read config")
+            raise HTTPException(status_code=500, detail="Failed to read config")
 
         self._config_cache[client_id] = config
         return config
 
+    # -------------------------
+    # ATOMIC WRITE HELPER
+    # -------------------------
+    def _atomic_write(self, file_path: str, data: dict):
+        try:
+            with tempfile.NamedTemporaryFile("w", delete=False, dir=os.path.dirname(file_path)) as tmp:
+                yaml.safe_dump(data, tmp, sort_keys=False)
+                temp_path = tmp.name
 
+            os.replace(temp_path, file_path)  # atomic replace
+        except Exception:
+            logger.exception("[CONFIG] Atomic write failed")
+            raise
+
+    # -------------------------
+    # CREATE CONFIG
+    # -------------------------
     async def create_config(self, client_id: str, config: ConfigCreate):
-        logger.info(f"[CONFIG] Creating config for client {client_id}")
 
-        config_path = self._get_client_config_path(client_id)
-        self._ensure_client_dir(client_id)
+        client_lock = self._client_locks[client_id]
 
-        agents_data = {}
-        db_agents_data = {}
+        async with client_lock:
 
-        for agent_name, agent in config.allowed_agents.items():
+            logger.info(f"[CONFIG] Creating config | client_id={client_id}")
 
-            logger.info(f"[CONFIG] Validating agent {agent_name}:{agent.agent_version}")
+            config_path = self._get_client_config_path(client_id)
+            self._ensure_client_dir(client_id)
 
-            agent_info = await self.agent_repo.get_agent_by_version(agent_name, agent.agent_version)
+            agents_data = {}
+            db_agents_data = {}
 
-            if not agent_info:
-                logger.warning(f"[CONFIG] Invalid agent/version: {agent_name}:{agent.agent_version}")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid agent/version: {agent_name} ({agent.agent_version})"
+
+            for agent_name, agent in config.allowed_agents.items():
+
+                agent_info = await self.agent_repo.get_agent_by_version(
+                    agent_name, agent.agent_version
                 )
 
-            model_info = await self.model_repo.get_model_by_id(agent_info.model_id)
+                if not agent_info:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid agent/version: {agent_name}"
+                    )
 
-            agent_dict = {
-                "agent_id": agent_info.agent_id,
-                "agent_version": agent_info.agent_version,
-                "enabled": True,
-                "model_name": model_info.model_name,
-                "temperature": getattr(agent_info, "temperature", 0),
-                "description": getattr(agent_info, "description", "")
-            }
+                model_info = await self.model_repo.get_model_by_id(agent_info.model_id)
 
-            if agent.database:
-                agent_dict["database"] = {
-                    k: v.model_dump(exclude_none=True)
-                    for k, v in agent.database.items()
+                agent_dict = {
+                    "agent_id": agent_info.agent_id,
+                    "agent_version": agent_info.agent_version,
+                    "enabled": True,
+                    "model_name": model_info.model_name,
+                    "temperature": getattr(agent_info, "temperature", 0),
+                    "description": getattr(agent_info, "description", "")
                 }
 
-            if agent.rag:
-                rag_config = agent.rag.model_dump(exclude_none=True)
-                agent_dict["top_k"] = rag_config.get("top_k", 3)
-                agent_dict["vector_db"] = rag_config.get("vector_db", "faiss")
+                if agent.database:
+                    agent_dict["database"] = {
+                        k: v.model_dump(exclude_none=True)
+                        for k, v in agent.database.items()
+                    }
 
-            agents_data[agent_name] = agent_dict
-            db_agents_data[agent_name] = agent.model_dump(exclude_none=True)
+                if agent.rag:
+                    rag = agent.rag.model_dump(exclude_none=True)
+                    agent_dict["top_k"] = rag.get("top_k", 3)
+                    agent_dict["vector_db"] = rag.get("vector_db", "faiss")
 
-        config_dict = {
-            "client_name": config.client_name,
-            "allowed_agents": agents_data
-        }
+                agents_data[agent_name] = agent_dict
+                db_agents_data[agent_name] = agent.model_dump(exclude_none=True)
 
-        logger.info(f"[CONFIG] Validating client existence: {client_id}")
+            config_dict = {
+                "client_name": config.client_name,
+                "allowed_agents": agents_data
+            }
 
-        existing_client = await self.client_repo.get_client_by_id(client_id)
-        if not existing_client:
-            logger.warning(f"[CONFIG] Client not found: {client_id}")
-            raise HTTPException(status_code=404, detail="Client not found")
+            
+            existing_client = await self.client_repo.get_client_by_id(client_id)
+            if not existing_client:
+                raise HTTPException(status_code=404, detail="Client not found")
 
-        update_payload = ClientUpdate(allowed_agents=db_agents_data)
+            await self.client_repo.update_client(
+                existing_client,
+                ClientUpdate(allowed_agents=db_agents_data)
+            )
 
-        await self.client_repo.update_client(existing_client, update_payload)
-        logger.info(f"[CONFIG] Updated allowed_agents in DB for client {client_id}")
+            # -------------------------
+            # FILE WRITE (ATOMIC)
+            # -------------------------
+            try:
+                self._atomic_write(config_path, config_dict)
+            except Exception:
+                logger.critical("[CONFIG] DB updated but file write failed")
+                raise HTTPException(status_code=500, detail="Config write failed")
 
-        with open(config_path, "w") as f:
-            yaml.safe_dump(config_dict, f, sort_keys=False)
+            
+            self._config_cache[client_id] = config_dict
 
-        logger.info(f"[CONFIG] Config file created successfully for client {client_id}")
+            logger.info(f"[CONFIG] Config created successfully | client_id={client_id}")
 
-        self._config_cache[client_id] = config_dict
+            return {"message": "Config created successfully"}
 
-        return {"message": "Config file created successfully"}
+    # -------------------------
+    # DELETE CONFIG
+    # -------------------------
+    async def remove_config(self, client_id: str):
 
+        client_lock = self._client_locks[client_id]
 
-    def remove_config(self, client_id: str):
+        async with client_lock:
 
-        logger.info(f"[CONFIG] Removing config for client {client_id}")
+            logger.info(f"[CONFIG] Removing config | client_id={client_id}")
 
-        config_path = self._get_client_config_path(client_id)
+            config_path = self._get_client_config_path(client_id)
 
-        try:
-            os.remove(config_path)
-        except FileNotFoundError:
-            logger.warning(f"[CONFIG] Config file not found for deletion: {client_id}")
-            raise HTTPException(status_code=404, detail="Config file not found")
+            try:
+                os.remove(config_path)
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail="Config file not found")
+            except Exception:
+                logger.exception("[CONFIG] Failed to delete config")
+                raise HTTPException(status_code=500, detail="Delete failed")
 
-        self._config_cache.pop(client_id, None)
-        self._db_cache.pop(client_id, None)
+            self._config_cache.pop(client_id, None)
 
-        logger.info(f"[CONFIG] Config removed successfully for client {client_id}")
+            logger.info(f"[CONFIG] Config removed | client_id={client_id}")
 
-        return {"message": "Config file removed successfully"}
+            return {"message": "Config removed successfully"}

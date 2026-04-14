@@ -1,5 +1,9 @@
 import os
 import json
+import asyncio
+from cachetools import TTLCache
+from collections import defaultdict
+
 from langchain_chroma import Chroma
 from src.vector_db.base import BaseVectorStore
 from transformers import logging as hf_logging
@@ -9,7 +13,17 @@ hf_logging.set_verbosity_error()
 
 
 class ChromaVectorStore(BaseVectorStore):
-    
+
+    # -------------------------
+    # CACHE
+    # -------------------------
+    _cache = TTLCache(maxsize=50, ttl=1800)
+
+    # -------------------------
+    # PER CLIENT LOCKS
+    # -------------------------
+    _client_locks = defaultdict(asyncio.Lock)
+
     def __init__(self):
         super().__init__()
         self.embedding = self._get_embedding()
@@ -22,34 +36,84 @@ class ChromaVectorStore(BaseVectorStore):
         
         os.makedirs(docs_path, exist_ok=True)
         os.makedirs(chroma_path, exist_ok=True)
-        
+
         return chroma_path, docs_path
-    
 
-    def append_to_store(self, client_id: str, document_name: str, paragraphs: list):
+    # -------------------------
+    # SAFE LOAD STORE
+    # -------------------------
+    async def _load_store(self, client_id, chroma_path):
 
-        logger.info(f"[CHROMA] Chroma append start | client_id={client_id}, document={document_name}")
+        # FAST PATH
+        cached = self._cache.get(client_id)
+        if cached:
+            logger.info(f"[CHROMA] Cache hit | client_id={client_id}")
+            return cached
+
+        client_lock = self._client_locks[client_id]
+
+        async with client_lock:
+
+            # DOUBLE CHECK
+            cached = self._cache.get(client_id)
+            if cached:
+                return cached
+
+            logger.info(f"[CHROMA] Loading store from disk | client_id={client_id}")
+
+            try:
+                vector_store = Chroma(
+                    persist_directory=chroma_path,
+                    embedding_function=self.embedding
+                )
+            except Exception:
+                logger.exception(f"[CHROMA] Failed to initialize store | client_id={client_id}")
+                return None
+
+            self._cache[client_id] = vector_store
+            return vector_store
+
+    # -------------------------
+    # SAFE INVALIDATION
+    # -------------------------
+    async def _invalidate_cache(self, client_id):
+
+        client_lock = self._client_locks[client_id]
+
+        async with client_lock:
+
+            if client_id in self._cache:
+                logger.info(f"[CHROMA] Cache invalidated | client_id={client_id}")
+                self._cache.pop(client_id, None)
+
+
+    # -------------------------
+    # APPEND
+    # -------------------------
+    async def append_to_store(self, client_id: str, document_name: str, paragraphs: list):
+
+        logger.info(f"[CHROMA] Append start | client_id={client_id}, document={document_name}")
 
         chroma_path, docs_path = self._get_vector_path(client_id)
         hash_path = os.path.join(docs_path, f"{document_name}.hashes")
 
         if paragraphs is None:
-            logger.info("[CHROMA] Skipping update (file already processed)")
+            logger.info("[CHROMA] Skipping update (already processed)")
             return "File already processed"
-        
+
         new_hash_map = {p["hash"]: p["text"] for p in paragraphs}
         new_hashes = set(new_hash_map.keys())
 
-        vector_store = Chroma(
-            persist_directory=chroma_path,
-            embedding_function=self.embedding
-        )
+        vector_store = await self._load_store(client_id, chroma_path)
+
+        if not vector_store:
+            logger.error("[CHROMA] Store not available")
+            return "Vector store not available"
 
         before_count = vector_store._collection.count()
-        logger.info(f"[CHROMA] Embeddings before update: {before_count}")
 
         # -----------------------------
-        # CASE 1: SAME FILENAME UPDATE
+        # EXISTING FILE
         # -----------------------------
         if os.path.exists(hash_path):
 
@@ -74,22 +138,19 @@ class ChromaVectorStore(BaseVectorStore):
                 vector_store.delete(ids=list(deleted))
 
         # -----------------------------
-        # CASE 2: NEW FILENAME
+        # NEW FILE
         # -----------------------------
         else:
 
             logger.info("[CHROMA] New document detected")
 
             existing = vector_store._collection.get(include=[])
-            existing_hashes = set(existing["ids"])
+            existing_hashes = set(existing.get("ids", []))
 
             added = new_hashes - existing_hashes
-            deleted = set()
-
-            logger.info(f"[CHROMA] Duplicate check | total={len(new_hashes)}, new={len(added)}, existing={len(new_hashes - added)}")
 
         # -----------------------------
-        # ADD NEW EMBEDDINGS
+        # ADD
         # -----------------------------
         if added:
 
@@ -106,34 +167,36 @@ class ChromaVectorStore(BaseVectorStore):
             )
 
         after_count = vector_store._collection.count()
-        change = after_count - before_count
 
-        logger.info(f"[CHROMA] Embeddings after update: {after_count}")
-        logger.info(f"[CHROMA] Net embedding change: {change}")
+        logger.info(f"[CHROMA] Count before={before_count}, after={after_count}")
 
         # -----------------------------
-        # SAVE HASH FILE
+        # SAVE HASH
         # -----------------------------
         with open(hash_path, "w") as f:
             json.dump(new_hash_map, f)
 
-        logger.info("[CHROMA] Chroma update complete")
+        await self._invalidate_cache(client_id)
 
         return "Incremental update complete"
 
-
-    def retrieve(self, client_id, query, top_k):
-        logger.info(f"[CHROMA] Chroma retrieve | client_id={client_id}, top_k={top_k}, question={query}")
+    # -------------------------
+    # RETRIEVE
+    # -------------------------
+    async def retrieve(self, client_id, query, top_k):
+        
+        logger.info(f"[CHROMA] Retrieve | client_id={client_id}, top_k={top_k}, question={query}")
 
         chroma_path, _ = self._get_vector_path(client_id)
 
-        vector_store = Chroma(
-            persist_directory=chroma_path,
-            embedding_function=self.embedding
-        )
+        vector_store = await self._load_store(client_id, chroma_path)
 
-        docs = vector_store.similarity_search(query, k=top_k)
+        if not vector_store:
+            return []
 
-        logger.info(f"[CHROMA] Retrieved {len(docs)} documents from Chroma")
-
-        return docs
+        try:
+            docs = vector_store.similarity_search(query, k=top_k)
+            return docs
+        except Exception:
+            logger.exception("[CHROMA] Retrieval failed")
+            return []

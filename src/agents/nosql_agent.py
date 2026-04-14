@@ -1,6 +1,9 @@
 import json
-import time
 import asyncio
+import time
+from cachetools import TTLCache
+from collections import defaultdict
+
 from src.agents.base import BaseAgent
 from src.prompts.nosql_prompt import NOSQL_PROMPT
 from src.tools.nosql_search import run_nosql_query
@@ -11,85 +14,78 @@ from src.utils.logger import logger
 
 class NoSQLAgent(BaseAgent):
 
+    _schema_cache = TTLCache(maxsize=100, ttl=600)
+    _client_locks = defaultdict(asyncio.Lock)
+
     def __init__(self, name, config, llm):
         super().__init__(name, config)
-
         self.llm = llm
         self.schema_extractor = NoSQLSchemaExtractor()
 
-        self._schema_cache = {}
-        self._cache_ttl = 600
-
-    # -------------------------
-    # Get schemas
-    # -------------------------
     async def _get_schemas(self, client_id, current_user, connection_manager: ConnectionManager):
 
-        connections = connection_manager.get_client_connections(
+        connections = await connection_manager.get_client_connections(
             client_id,
             current_user
         )
 
         nosql_connections = connections.get("nosql", {})
-
         schemas = {}
 
         for alias, conn_info in nosql_connections.items():
 
             cache_key = f"{client_id}_{alias}"
+
             cached = self._schema_cache.get(cache_key)
+            if cached is not None:
+                logger.info(f"[NoSQLAgent] Schema cache hit | alias={alias}")
+                schemas[alias] = cached
+                continue
 
-            if cached:
-                age = time.time() - cached["timestamp"]
+            client_lock = self._client_locks[cache_key]
 
-                if age < self._cache_ttl:
-                    logger.info(f"[NoSQLAgent] Schema cache hit for connection: {alias}")
-                    schemas[alias] = cached["schema"]
+            async with client_lock:
+
+                cached = self._schema_cache.get(cache_key)
+                if cached is not None:
+                    schemas[alias] = cached
                     continue
-                else:
-                    logger.info(f"[NoSQLAgent] Schema cache expired for connection: {alias}")
 
-            logger.info(f"[NoSQLAgent] Fetching schema for connection: {alias}")
+                start = time.perf_counter()
 
-            schema = await self.schema_extractor.extract_schema(conn_info)
+                schema = await self.schema_extractor.extract_schema(conn_info)
 
-            full_schema = {
-                "db_type": conn_info["db_type"],
-                "db_name": conn_info.get("db_name"),
-                "schema": schema
-            }
+                full_schema = {
+                    "db_type": conn_info["db_type"],
+                    "db_name": conn_info.get("db_name"),
+                    "schema": schema
+                }
 
-            self._schema_cache[cache_key] = {
-                "schema": full_schema,
-                "timestamp": time.time()
-            }
+                self._schema_cache[cache_key] = full_schema
 
-            schemas[alias] = full_schema
+                logger.info(
+                    f"[NoSQLAgent] Schema extracted | alias={alias} | "
+                    f"time={time.perf_counter() - start:.2f}s"
+                )
+
+                schemas[alias] = full_schema
 
         return schemas
 
-    # -------------------------
-    # Format schema
-    # -------------------------
     def _format_schema(self, schemas):
 
         schema_text = ""
 
         for alias, schema in schemas.items():
 
-            db_type = schema.get("db_type")
-
             schema_text += f"\nConnection: {alias}\n"
-            schema_text += f"Database Type: {db_type}\n"
+            schema_text += f"Database Type: {schema.get('db_type')}\n"
 
             for key, value in schema.items():
                 schema_text += f"{key}: {value}\n"
 
         return schema_text
 
-    # -------------------------
-    # Generate queries
-    # -------------------------
     async def _generate_sub_queries(self, state):
 
         schemas = await self._get_schemas(
@@ -107,10 +103,14 @@ class NoSQLAgent(BaseAgent):
             query=state["user_query"]
         )
 
+        start = time.perf_counter()
+
         response = await self.llm.ainvoke(prompt)
         raw = response.content.strip()
 
-        logger.info(f"[NoSQLAgent] LLM response received for query generation:\n {raw}")
+        logger.info(
+            f"[NoSQLAgent] LLM response received | time={time.perf_counter() - start:.2f}s"
+        )
 
         try:
             parsed = json.loads(raw)
@@ -121,34 +121,44 @@ class NoSQLAgent(BaseAgent):
             if isinstance(parsed, list):
                 return parsed
 
-            logger.warning("[NoSQLAgent] Unexpected LLM response format")
             return []
 
         except Exception:
-            logger.warning("[NoSQLAgent] Failed to parse LLM response as JSON")
+            logger.warning(f"[NoSQLAgent] Failed to parse LLM response:\n{raw}")
             return []
 
-    # -------------------------
-    # Execute single query
-    # -------------------------
     async def _execute_query(self, task, nosql_connections):
 
         alias = task.get("connection_alias")
 
         if not alias:
-            logger.warning("[NoSQLAgent] Missing connection alias in task")
             return None
 
         conn_info = nosql_connections.get(alias)
-
         if not conn_info:
-            logger.warning(f"[NoSQLAgent] Invalid connection alias: {alias}")
             return None
 
         try:
-            rows = await run_nosql_query(task, conn_info)
+            start = time.perf_counter()
+
+            rows = await asyncio.wait_for(
+                run_nosql_query(task, conn_info),
+                timeout=10
+            )
+
+            rows = rows[:1000] if rows else []
+
+            logger.info(
+                f"[NoSQLAgent] Query executed | alias={alias} | "
+                f"rows={len(rows)} | time={time.perf_counter() - start:.2f}s"
+            )
+
+        except asyncio.TimeoutError:
+            logger.error(f"[NoSQLAgent] Query timeout | alias={alias}")
+            return None
+
         except Exception:
-            logger.exception(f"[NoSQLAgent] NoSQL query execution failed for connection: {alias}")
+            logger.exception(f"[NoSQLAgent] NoSQL execution failed | alias={alias}")
             return None
 
         return {
@@ -157,37 +167,30 @@ class NoSQLAgent(BaseAgent):
             "rows": rows
         }
 
-    # -------------------------
-    # Main run
-    # -------------------------
     async def run(self, state):
 
         tasks = await self._generate_sub_queries(state)
 
-        logger.info(f"[NoSQLAgent] Generated {len(tasks)} NoSQL tasks")
+        if not tasks:
+            return {"nosql_agent_results": state.get("nosql_agent_results", [])}
 
         client_id = state["client_id"]
         current_user = state["current_user"]
         connection_manager = state["connection_manager"]
 
-        connections = connection_manager.get_client_connections(
+        connections = await connection_manager.get_client_connections(
             client_id,
             current_user
         )
 
         nosql_connections = connections.get("nosql", {})
 
-        coroutines = [
+        results = await asyncio.gather(*[
             self._execute_query(task, nosql_connections)
             for task in tasks
-        ]
+        ])
 
-        results = await asyncio.gather(*coroutines, return_exceptions=True)
-
-        all_results = [
-            r for r in results
-            if r and not isinstance(r, Exception)
-        ]
+        all_results = [r for r in results if r]
 
         existing = state.get("nosql_agent_results", [])
 

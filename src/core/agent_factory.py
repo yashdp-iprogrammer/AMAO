@@ -8,7 +8,7 @@ class AgentFactory:
     def __init__(self):
         self.registry = AgentRegistry()
 
-    def create_agents(self, agent_configs: dict):
+    async def create_agents(self, agent_configs: dict):
 
         logger.info(f"[AGENT FACTORY] Creating agents | count={len(agent_configs)}")
 
@@ -24,7 +24,7 @@ class AgentFactory:
 
             logger.info(f"[AGENT FACTORY] Initializing agent: {agent_name}")
 
-            llm = LLMFactory.create({
+            llm = await LLMFactory.create({
                 "model_name": agent_conf["model_name"],
                 "temperature": agent_conf.get("temperature", 0),
                 "api_key": agent_conf.get("api_key")

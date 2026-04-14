@@ -12,7 +12,7 @@ async def retrieve_documents(vectordb: VectorDBService, client_id: str, query: s
 
     logger.info(f"[RAG SEARCH] Retrieving documents | client_id={client_id}, top_k={top_k}")
 
-    docs = vectordb.retrieve(
+    docs = await vectordb.retrieve(
         client_id=client_id,
         query=query,
         top_k=top_k

@@ -1,5 +1,9 @@
 import os
 import json
+import asyncio
+from cachetools import TTLCache
+from collections import defaultdict
+
 from src.vector_db.base import BaseVectorStore
 from langchain_community.vectorstores import FAISS
 from transformers import logging as hf_logging
@@ -9,7 +13,17 @@ hf_logging.set_verbosity_error()
 
 
 class FaissVectorStore(BaseVectorStore):
-    
+
+    # -------------------------
+    # SHARED CACHE (TTL + LRU)
+    # -------------------------
+    _cache = TTLCache(maxsize=50, ttl=1800)
+
+    # -------------------------
+    # PER CLIENT LOCKS
+    # -------------------------
+    _client_locks = defaultdict(asyncio.Lock)
+
     def __init__(self):
         super().__init__()
         self.embedding = self._get_embedding()
@@ -17,51 +31,93 @@ class FaissVectorStore(BaseVectorStore):
     def _get_vector_path(self, client_id):
 
         client_root = self._get_client_root(client_id)
-        faiss_path = os.path.join(client_root, "faiss")
         
+        faiss_path = os.path.join(client_root, "faiss")
         docs_path = os.path.join(faiss_path, "hashes")
+        
         os.makedirs(faiss_path, exist_ok=True)
         os.makedirs(docs_path, exist_ok=True)
 
         return faiss_path, docs_path
 
+    # -------------------------
+    # SAFE LOAD STORE
+    # -------------------------
+    async def _load_store(self, client_id, faiss_path):
 
-    def append_to_store(self, client_id: str, document_name: str, paragraphs: list):
+        # FAST PATH
+        cached = self._cache.get(client_id)
+        if cached:
+            logger.info(f"[FAISS] Cache hit | client_id={client_id}")
+            return cached
 
-        logger.info(f"[FAISS] Faiss append start | client_id={client_id}, document={document_name}")
+        client_lock = self._client_locks[client_id]
+
+        async with client_lock:
+
+            # DOUBLE CHECK
+            cached = self._cache.get(client_id)
+            if cached:
+                return cached
+
+            index_file = os.path.join(faiss_path, "index.faiss")
+
+            if not os.path.exists(index_file):
+                logger.warning(f"[FAISS] No index file found | client_id={client_id}")
+                return None
+
+            logger.info(f"[FAISS] Loading FAISS index | client_id={client_id}")
+
+            try:
+                vector_store = FAISS.load_local(
+                    faiss_path,
+                    embeddings=self.embedding,
+                    allow_dangerous_deserialization=True
+                )
+            except Exception:
+                logger.exception(f"[FAISS] Failed to load FAISS index | client_id={client_id}")
+                return None
+
+            self._cache[client_id] = vector_store
+            return vector_store
+
+    # -------------------------
+    # SAFE INVALIDATION
+    # -------------------------
+    async def _invalidate_cache(self, client_id):
+
+        client_lock = self._client_locks[client_id]
+
+        async with client_lock:
+
+            if client_id in self._cache:
+                logger.info(f"[FAISS] Cache invalidated | client_id={client_id}")
+                self._cache.pop(client_id, None)
+
+
+    # -------------------------
+    # APPEND
+    # -------------------------
+    async def append_to_store(self, client_id: str, document_name: str, paragraphs: list):
+
+        logger.info(f"[FAISS] Append start | client_id={client_id}, document={document_name}")
 
         faiss_path, docs_path = self._get_vector_path(client_id)
         hash_path = os.path.join(docs_path, f"{document_name}.hashes")
 
         if paragraphs is None:
-            logger.info("[FAISS] Skipping update (file already processed)")
+            logger.info("[FAISS] Skipping update (already processed)")
             return "File already processed"
 
         new_hash_map = {p["hash"]: p["text"] for p in paragraphs}
         new_hashes = set(new_hash_map.keys())
 
-        index_file = os.path.join(faiss_path, "index.faiss")
+        vector_store = await self._load_store(client_id, faiss_path)
 
-        vector_store = None
-        before_count = 0
-
-        if os.path.exists(index_file):
-            logger.info("[FAISS] Loading existing FAISS index")
-
-            vector_store = FAISS.load_local(
-                faiss_path,
-                embeddings=self.embedding,
-                allow_dangerous_deserialization=True
-            )
-
-            before_count = vector_store.index.ntotal
-            logger.info(f"[FAISS] Embeddings before update: {before_count}")
-
-        else:
-            logger.warning("[FAISS] No existing FAISS index found")
+        before_count = vector_store.index.ntotal if vector_store else 0
 
         # -----------------------------
-        # CASE 1: SAME FILENAME UPDATE
+        # EXISTING FILE
         # -----------------------------
         if os.path.exists(hash_path):
 
@@ -82,28 +138,18 @@ class FaissVectorStore(BaseVectorStore):
             logger.info(f"[FAISS] Diff summary | added={len(added)}, deleted={len(deleted)}")
 
             if deleted and vector_store:
-                logger.info(f"[FAISS] Deleting {len(deleted)} embeddings for document={document_name}")
                 vector_store.delete(ids=list(deleted))
 
         # -----------------------------
-        # CASE 2: NEW FILENAME
+        # NEW FILE
         # -----------------------------
         else:
 
-            logger.info("[FAISS] New document detected")
-
-            if vector_store:
-                existing_hashes = set(vector_store.docstore._dict.keys())
-            else:
-                existing_hashes = set()
-
+            existing_hashes = set(vector_store.docstore._dict.keys()) if vector_store else set()
             added = new_hashes - existing_hashes
-            deleted = set()
-
-            logger.info(f"[FAISS] Duplicate check | total={len(new_hashes)}, new={len(added)}, existing={len(new_hashes - added)}")
 
         # -----------------------------
-        # ADD NEW EMBEDDINGS
+        # ADD
         # -----------------------------
         if added:
 
@@ -114,7 +160,6 @@ class FaissVectorStore(BaseVectorStore):
             if vector_store:
                 logger.info(f"[FAISS] Adding {len(texts)} embeddings")
                 vector_store.add_texts(texts=texts, ids=ids, metadatas=metadatas)
-
             else:
                 logger.info("[FAISS] Creating new FAISS store")
 
@@ -126,55 +171,37 @@ class FaissVectorStore(BaseVectorStore):
                 )
 
         # -----------------------------
-        # SAVE INDEX
+        # SAVE
         # -----------------------------
         if vector_store:
+            try:
+                vector_store.save_local(faiss_path)
+            except Exception:
+                logger.exception(f"[FAISS] Failed to save index | client_id={client_id}")
 
-            after_count = vector_store.index.ntotal
-            change = after_count - before_count
-
-            logger.info(f"[FAISS] Embeddings after update: {after_count}")
-            logger.info(f"[FAISS] Net embedding change: {change}")
-
-            vector_store.save_local(faiss_path)
-
-            logger.info("[FAISS] Faiss index saved successfully")
-
-        # -----------------------------
-        # SAVE DOCUMENT STRUCTURE
-        # -----------------------------
         with open(hash_path, "w") as f:
             json.dump(new_hash_map, f)
 
-        logger.info("[FAISS] Faiss update complete")
+        await self._invalidate_cache(client_id)
 
         return "Incremental update complete"
 
+    # -------------------------
+    # RETRIEVE
+    # -------------------------
+    async def retrieve(self, client_id, query, top_k=5):
 
-    def retrieve(self, client_id, query, top_k=5):
-
-        logger.info(f"[FAISS] Faiss retrieve | client_id={client_id}, top_k={top_k}, question={query}")
+        logger.info(f"[FAISS] Retrieve | client_id={client_id}, top_k={top_k}")
 
         faiss_path, _ = self._get_vector_path(client_id)
-        index_file = os.path.join(faiss_path, "index.faiss")
 
-        if not os.path.exists(index_file):
-            logger.warning(f"[FAISS] Faiss index not found for client_id={client_id}")
+        vector_db = await self._load_store(client_id, faiss_path)
+
+        if not vector_db:
             return []
 
         try:
-            vector_db = FAISS.load_local(
-                faiss_path,
-                embeddings=self.embedding,
-                allow_dangerous_deserialization=True
-            )
-
-            docs = vector_db.similarity_search(query, k=top_k)
-
-            logger.info(f"[FAISS] Retrieved {len(docs)} documents from FAISS")
-
-            return docs
-
+            return vector_db.similarity_search(query, k=top_k)
         except Exception:
-            logger.exception("[FAISS] Error during FAISS retrieval")
+            logger.exception("[FAISS] Retrieval failed")
             return []

@@ -1,6 +1,9 @@
 import json
-import time
 import asyncio
+import time
+from cachetools import TTLCache
+from collections import defaultdict
+
 from src.agents.base import BaseAgent
 from src.prompts.sql_prompt import SQL_PROMPT
 from src.tools.sql_search import run_sql_query
@@ -11,21 +14,17 @@ from src.utils.logger import logger
 
 class SQLAgent(BaseAgent):
 
+    _schema_cache = TTLCache(maxsize=100, ttl=600)
+    _client_locks = defaultdict(asyncio.Lock)
+
     def __init__(self, name, config, llm):
         super().__init__(name, config)
-
         self.llm = llm
         self.schema_extractor = SQLSchemaExtractor()
 
-        self._schema_cache = {}
-        self._cache_ttl = 600
-
-    # -------------------------
-    # Get schemas
-    # -------------------------
     async def _get_schemas(self, client_id, current_user, connection_manager: ConnectionManager):
 
-        connections = connection_manager.get_client_connections(
+        connections = await connection_manager.get_client_connections(
             client_id,
             current_user
         )
@@ -36,46 +35,47 @@ class SQLAgent(BaseAgent):
         for alias, conn_info in sql_connections.items():
 
             cache_key = f"{client_id}_{alias}"
+
             cached = self._schema_cache.get(cache_key)
+            if cached is not None:
+                logger.info(f"[SQLAgent] Schema cache hit | alias={alias}")
+                schemas[alias] = cached
+                continue
 
-            if cached:
-                age = time.time() - cached["timestamp"]
+            client_lock = self._client_locks[cache_key]
 
-                if age < self._cache_ttl:
-                    logger.info(f"[SQLAgent] Schema cache hit for connection: {alias}")
-                    schemas[alias] = cached["schema"]
+            async with client_lock:
+
+                cached = self._schema_cache.get(cache_key)
+                if cached is not None:
+                    schemas[alias] = cached
                     continue
-                else:
-                    logger.info(f"[SQLAgent] Schema cache expired for connection: {alias}")
 
-            logger.info(f"[SQLAgent] Fetching schema for connection: {alias}")
+                start = time.perf_counter()
 
-            schema = await self.schema_extractor.extract_schema(
-                conn_info["connection"]
-            )
+                schema = await self.schema_extractor.extract_schema(
+                    conn_info["connection"]
+                )
 
-            self._schema_cache[cache_key] = {
-                "schema": schema,
-                "timestamp": time.time()
-            }
+                self._schema_cache[cache_key] = schema
 
-            schemas[alias] = schema
+                logger.info(
+                    f"[SQLAgent] Schema extracted | alias={alias} | "
+                    f"time={time.perf_counter() - start:.2f}s"
+                )
+
+                schemas[alias] = schema
 
         return schemas
 
-    # -------------------------
-    # Format schema
-    # -------------------------
     def _format_schema(self, schemas):
 
         schema_text = ""
 
         for alias, tables in schemas.items():
-
             schema_text += f"\nConnection Alias: {alias}\n"
 
             for table, columns in tables.items():
-
                 schema_text += f"\nTable: {table}\n"
 
                 for col in columns:
@@ -83,9 +83,6 @@ class SQLAgent(BaseAgent):
 
         return schema_text
 
-    # -------------------------
-    # Generate queries
-    # -------------------------
     async def _generate_sub_queries(self, state):
 
         schemas = await self._get_schemas(
@@ -103,46 +100,70 @@ class SQLAgent(BaseAgent):
             query=state["user_query"]
         )
 
+        start = time.perf_counter()
+
         response = await self.llm.ainvoke(prompt)
         raw_output = response.content.strip()
 
-        logger.info(f"[SQLAgent] LLM response received for query generation:\n{raw_output}")
+        logger.info(
+            f"[SQLAgent] LLM response received | time={time.perf_counter() - start:.2f}s"
+        )
 
         try:
             parsed = json.loads(raw_output)
-            return parsed
 
-        except Exception:
-            logger.warning("[SQLAgent] Failed to parse LLM response")
+            if isinstance(parsed, dict):
+                return [parsed]
+
+            if isinstance(parsed, list):
+                return parsed
+
             return []
 
-    # -------------------------
-    # Execute single query
-    # -------------------------
+        except Exception:
+            logger.warning(f"[SQLAgent] Failed to parse LLM response:\n{raw_output}")
+            return []
+
     async def _execute_query(self, task, sql_connections):
 
         alias = task.get("connection_alias")
         query = task.get("query")
 
         if not alias or not query:
-            logger.warning("[SQLAgent] Missing alias or query in task")
             return None
 
-        if not query.lower().startswith("select"):
-            logger.warning(f"[SQLAgent] Non-SELECT query blocked for connection: {alias}")
+        # minimal safety check
+        q = query.strip().lower()
+        if not q.startswith("select") or ";" in q:
+            logger.warning(f"[SQLAgent] Unsafe query blocked: {query}")
             return None
 
         conn_info = sql_connections.get(alias)
-
         if not conn_info:
-            logger.warning(f"[SQLAgent] Invalid connection alias: {alias}")
             return None
 
         try:
-            rows = await run_sql_query(query, conn_info["connection"])
+            start = time.perf_counter()
+
+            rows = await asyncio.wait_for(
+                run_sql_query(query, conn_info["connection"]),
+                timeout=10
+            )
+
+            rows = rows[:1000] if rows else []
+
+            logger.info(
+                f"[SQLAgent] Query executed | alias={alias} | "
+                f"rows={len(rows)} | time={time.perf_counter() - start:.2f}s"
+            )
+
+        except asyncio.TimeoutError:
+            logger.error(f"[SQLAgent] Query timeout | alias={alias}")
+            return None
+
         except Exception:
-            logger.exception(f"[SQLAgent] SQL execution failed for connection: {alias}")
-            rows = []
+            logger.exception(f"[SQLAgent] SQL execution failed | alias={alias}")
+            return None
 
         return {
             "connection": alias,
@@ -150,33 +171,28 @@ class SQLAgent(BaseAgent):
             "rows": rows
         }
 
-    # -------------------------
-    # Main run
-    # -------------------------
     async def run(self, state):
 
         tasks = await self._generate_sub_queries(state)
 
-        logger.info(f"[SQLAgent] Generated {len(tasks)} SQL tasks")
+        if not tasks:
+            return {"sql_agent_results": state.get("sql_agent_results", [])}
 
         client_id = state["client_id"]
         current_user = state["current_user"]
-
         connection_manager: ConnectionManager = state["connection_manager"]
 
-        connections = connection_manager.get_client_connections(
+        connections = await connection_manager.get_client_connections(
             client_id,
             current_user
         )
 
         sql_connections = connections.get("sql", {})
 
-        coroutines = [
+        results = await asyncio.gather(*[
             self._execute_query(task, sql_connections)
             for task in tasks
-        ]
-
-        results = await asyncio.gather(*coroutines)
+        ])
 
         all_results = [r for r in results if r]
 

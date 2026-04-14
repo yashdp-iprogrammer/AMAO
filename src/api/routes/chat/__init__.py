@@ -78,7 +78,7 @@ async def run_chat(
                     logger.warning(f"[ChatRoute] No chunks extracted from file: {document_name}")
                     continue
 
-                vectordb.append_to_store(
+                await vectordb.append_to_store(
                     client_id,
                     document_name,
                     text_chunks
