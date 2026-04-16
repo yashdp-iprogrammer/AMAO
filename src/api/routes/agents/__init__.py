@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, Query
-from typing import Annotated, Optional
+from typing import Annotated
 from sqlalchemy.ext.asyncio import AsyncSession
-from src.Database.base_db import Database
 from src.schema.agent_schema import AgentCreate, AgentResponseList, AgentUpdate, AgentRead, AgentResponse
 from src.services.agent_service import AgentService
 from src.Database import system_db as db
@@ -23,7 +22,7 @@ async def create_agent(
     service: agent_session,
     current_user=Depends(auth_dependency.require_roles(["SuperAdmin"]))
 ):
-    logger.info(f"[CREATE_AGENT] user={current_user}, agent_name={agent.agent_name}{agent.agent_version}")
+    logger.info(f"[CREATE_AGENT] user={current_user}, agent_name={agent.agent_name}")
     return await service.create_agent(agent)
 
 

@@ -3,6 +3,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from sqlmodel.ext.asyncio.session import AsyncSession
 from src.repositories.client_repository import ClientRepo
+from src.services.config_service import ConfigService
 from src.Database.models import Client
 from src.schema.client_schema import ClientCreate, ClientUpdate
 from src.utils.logger import logger
@@ -13,6 +14,7 @@ class ClientService:
     def __init__(self, session: AsyncSession):
         self.session = session
         self.client_repo = ClientRepo(session)
+        self.config_service = ConfigService(session)
         self.hash_handler = hash_util
 
 
@@ -32,7 +34,7 @@ class ClientService:
             for k, v in client.allowed_agents.items()
         }
 
-        client = Client(
+        client_obj = Client(
             client_id=str(uuid4()),
             client_name=client_dict["client_name"],
             client_email=client_dict["client_email"],
@@ -43,9 +45,26 @@ class ClientService:
             updated_at=datetime.now(timezone.utc)
         )
 
-        created_client = await self.client_repo.create_client(client)
+        created_client = await self.client_repo.create_client(client_obj)
 
-        logger.info(f"[CLIENT] Client created successfully: {client.client_name}")
+        try:
+            await self.config_service.create_config(
+                client_id=created_client.client_id,
+                client_name=created_client.client_name,
+                allowed_agents=client.allowed_agents
+            )
+
+        except Exception:
+            logger.exception("[CLIENT] Config creation failed after client creation")
+
+            await self.client_repo.delete_client(created_client)
+
+            raise HTTPException(
+                status_code=500,
+                detail="Client created but config failed. Rolled back."
+            )
+
+        logger.info(f"[CLIENT] Client + Config created successfully: {client.client_name}")
 
         return {
             "message": "Client created successfully",
@@ -62,6 +81,21 @@ class ClientService:
             raise HTTPException(status_code=404, detail="Client not found")
 
         updated_client = await self.client_repo.update_client(existing_client, client)
+        
+        if client.allowed_agents:
+            try:
+                await self.config_service.create_config(
+                    client_id=updated_client.client_id,
+                    client_name=updated_client.client_name,
+                    allowed_agents=client.allowed_agents
+                )
+
+            except Exception:
+                logger.exception("[CLIENT] Config creation failed during update")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Client updated but config failed"
+                )
 
         logger.info(f"[CLIENT] Client updated successfully: {client_id}")
 

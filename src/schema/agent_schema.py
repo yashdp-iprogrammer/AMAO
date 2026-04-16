@@ -10,29 +10,26 @@ class DatabaseConfig(BaseModel):
     password: str
     db_name: str
 
-class RAGConfig(BaseModel):
-    top_k: int
-    vector_db: str
+
+class AgentConfig(BaseModel):
+    model_name: str
+    provider: str
+    temperature: float = 0
+
+    database: Optional[Dict[str, DatabaseConfig]] = None
+    top_k: Optional[int] = None
+    vector_db: Optional[str] = None
     
 
 class AgentCreate(BaseModel):
     model_id: str
     agent_name: str
-    agent_version: str
     token_limit: int
-    
-class AgentVersion(BaseModel):
-    agent_version: str
-    
-    # Optional configs
-    database: Optional[Dict[str, DatabaseConfig]] = None
-    rag: Optional[RAGConfig] = None
 
 
 class AgentUpdate(BaseModel):
     model_id: Optional[str] = None
     agent_name: Optional[str] = None
-    agent_version: Optional[str] = None
     token_limit: Optional[int] = None
     is_disabled: Optional[bool] = None
 
@@ -41,7 +38,6 @@ class AgentRead(BaseModel):
     agent_id: str
     model_id: str
     agent_name: str
-    agent_version: str
     token_limit: int
     is_disabled: bool
 

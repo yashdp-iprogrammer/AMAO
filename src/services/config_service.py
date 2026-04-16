@@ -5,11 +5,10 @@ import tempfile
 from cachetools import TTLCache
 from collections import defaultdict
 from fastapi import HTTPException
-
+from typing import Dict
 from src.utils.logger import logger
 from sqlmodel.ext.asyncio.session import AsyncSession
-from src.schema.config_schema import ConfigCreate
-from src.schema.client_schema import ClientUpdate
+from src.schema.agent_schema import AgentConfig
 from src.repositories.agent_repository import AgentRepo
 from src.repositories.model_repository import ModelRepo
 from src.repositories.client_repository import ClientRepo
@@ -83,7 +82,7 @@ class ConfigService:
     # -------------------------
     # CREATE CONFIG
     # -------------------------
-    async def create_config(self, client_id: str, config: ConfigCreate):
+    async def create_config(self, client_id, client_name: str, allowed_agents: Dict[str, AgentConfig]):
 
         client_lock = self._client_locks[client_id]
 
@@ -95,30 +94,14 @@ class ConfigService:
             self._ensure_client_dir(client_id)
 
             agents_data = {}
-            db_agents_data = {}
 
-
-            for agent_name, agent in config.allowed_agents.items():
-
-                agent_info = await self.agent_repo.get_agent_by_version(
-                    agent_name, agent.agent_version
-                )
-
-                if not agent_info:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Invalid agent/version: {agent_name}"
-                    )
-
-                model_info = await self.model_repo.get_model_by_id(agent_info.model_id)
+            for agent_name, agent in allowed_agents.items():
 
                 agent_dict = {
-                    "agent_id": agent_info.agent_id,
-                    "agent_version": agent_info.agent_version,
                     "enabled": True,
-                    "model_name": model_info.model_name,
-                    "temperature": getattr(agent_info, "temperature", 0),
-                    "description": getattr(agent_info, "description", "")
+                    "model_name": agent.model_name,
+                    "temperature": agent.temperature,
+                    "provider": agent.provider,
                 }
 
                 if agent.database:
@@ -127,39 +110,28 @@ class ConfigService:
                         for k, v in agent.database.items()
                     }
 
-                if agent.rag:
-                    rag = agent.rag.model_dump(exclude_none=True)
-                    agent_dict["top_k"] = rag.get("top_k", 3)
-                    agent_dict["vector_db"] = rag.get("vector_db", "faiss")
+                if agent.top_k is not None:
+                    agent_dict["top_k"] = agent.top_k
+
+                if agent.vector_db is not None:
+                    agent_dict["vector_db"] = agent.vector_db
 
                 agents_data[agent_name] = agent_dict
-                db_agents_data[agent_name] = agent.model_dump(exclude_none=True)
+
 
             config_dict = {
-                "client_name": config.client_name,
+                "client_name": client_name,
                 "allowed_agents": agents_data
             }
 
-            
-            existing_client = await self.client_repo.get_client_by_id(client_id)
-            if not existing_client:
-                raise HTTPException(status_code=404, detail="Client not found")
 
-            await self.client_repo.update_client(
-                existing_client,
-                ClientUpdate(allowed_agents=db_agents_data)
-            )
-
-            # -------------------------
-            # FILE WRITE (ATOMIC)
-            # -------------------------
             try:
                 self._atomic_write(config_path, config_dict)
             except Exception:
                 logger.critical("[CONFIG] DB updated but file write failed")
                 raise HTTPException(status_code=500, detail="Config write failed")
 
-            
+
             self._config_cache[client_id] = config_dict
 
             logger.info(f"[CONFIG] Config created successfully | client_id={client_id}")

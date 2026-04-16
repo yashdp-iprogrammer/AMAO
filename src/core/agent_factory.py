@@ -26,6 +26,7 @@ class AgentFactory:
 
             llm = await LLMFactory.create({
                 "model_name": agent_conf["model_name"],
+                "provider": agent_conf["provider"],
                 "temperature": agent_conf.get("temperature", 0),
                 "api_key": agent_conf.get("api_key")
             })

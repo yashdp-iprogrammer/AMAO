@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from sqlmodel import select, func
 from sqlmodel.ext.asyncio.session import AsyncSession
-from src.schema.agent_schema import AgentUpdate, AgentVersion
+from src.schema.agent_schema import AgentUpdate
 from src.Database.models import Agent
 
 
@@ -45,10 +45,9 @@ class AgentRepo:
         result = await self.session.exec(statement)
         return result.one_or_none()
     
-    async def get_agent_by_version(self, agent_name: str, agent_version: str):
+    async def get_agent_by_name(self, agent_name: str):
         statement = select(Agent).where(
             Agent.agent_name == agent_name,
-            Agent.agent_version == agent_version,
             Agent.is_disabled == False
         )
         result = await self.session.exec(statement)

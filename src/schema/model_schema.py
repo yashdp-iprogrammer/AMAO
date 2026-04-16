@@ -4,6 +4,7 @@ from typing import Optional
 
 class ModelCreate(BaseModel):
     model_name: str
+    provider: str
     token_size: int
     model_subscription: bool
     subscription_cost: float
@@ -11,6 +12,7 @@ class ModelCreate(BaseModel):
 
 class ModelUpdate(BaseModel):
     model_name: Optional[str] = None
+    provider: Optional[str] =  None
     token_size: Optional[int] = None
     model_subscription: Optional[bool] = None
     subscription_cost: Optional[float] = None
@@ -19,6 +21,7 @@ class ModelUpdate(BaseModel):
 class ModelRead(BaseModel):
     model_id: str
     model_name: str
+    provider: str
     token_size: int
     model_subscription: bool
     subscription_cost: float

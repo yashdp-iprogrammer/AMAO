@@ -109,8 +109,7 @@ If files are uploaded alongside the query, they are chunked and indexed into the
 │   ├── api/routes/
 │   │   ├── chat/__init__.py        # POST /chat — main query endpoint
 │   │   ├── auth/__init__.py        # /login /register /refresh /logout /get-current-user
-│   │   ├── clients/__init__.py     # Client CRUD + DB connection test
-│   │   ├── configs/__init__.py     # Per-client config.yaml CRUD
+│   │   ├── clients/__init__.py     # Client CRUD + atomic config creation
 │   │   ├── agents/__init__.py      # Agent management
 │   │   ├── models/__init__.py      # LLM model management
 │   │   ├── user/__init__.py        # User management
@@ -121,7 +120,7 @@ If files are uploaded alongside the query, they are chunked and indexed into the
 │   │   ├── orchestrator.py         # LangGraph graph: router → agents → final
 │   │   ├── graph_manager.py        # Per-client orchestrator cache (async-safe)
 │   │   ├── agent_factory.py        # Instantiates agents from config
-│   │   ├── llm_factory.py          # Creates & caches LLM clients (OpenAI / Groq)
+│   │   ├── llm_factory.py          # Creates LLM clients using provider field
 │   │   ├── registry.py             # Maps agent names → agent classes
 │   │   └── state_manager.py        # AgentState TypedDict definition
 │   │
@@ -352,22 +351,16 @@ Response: `{ "final_response": "...", "sql_agent_results": [...], ... }`
 ### Clients *(SuperAdmin only)*
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/clients/add-client` | Register a new client organisation |
-| `PUT` | `/clients/update-client/{client_id}` | Update client details |
+| `POST` | `/clients/add-client` | Register a new client organisation with config |
+| `PUT` | `/clients/update-client/{client_id}` | Update client details & config |
 | `DELETE` | `/clients/remove-client/{client_id}` | Delete a client |
 | `GET` | `/clients/list-clients` | Paginated client list |
 | `GET` | `/clients/get-client/{client_id}` | Get a single client |
 | `GET` | `/clients/connect/{client_id}` | Test client DB connections |
 
-### Configs *(SuperAdmin only)*
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/configs/create-config-file/{client_id}` | Upload a config.yaml for a client |
-| `PUT` | `/configs/update-config-file/{client_id}` | Update existing config |
-| `DELETE` | `/configs/remove-config-file/{client_id}` | Remove config |
-| `GET` | `/configs/read-config/{client_id}` | Read current config as JSON |
+**Note:** Config creation is now consolidated into the client lifecycle — config is automatically created when a client is registered, and updated when client details change.
 
-Additional route groups: `/agents`, `/models`, `/user`, `/feedback`, `/logs`.
+Additional route groups: `/user`, `/feedback`, `/logs`.
 
 ---
 
@@ -383,8 +376,8 @@ JWT-based login. Token is stored in `st.session_state` for the duration of the s
 - **Upload & Index Knowledge** expander — drag-and-drop PDFs or `.txt` files and click **Build Index** to ingest them into the RAG vector store before querying.
 
 ### Super Admin Dashboard *(SuperAdmin only)*
-- **Clients tab** — Register new client organisations, view the active client list.
-- **Configs tab** — Select a client, upload a `config.yaml`, or view the current config rendered as syntax-highlighted YAML.
+- **Clients tab** — Register new client organisations with dynamic agent selection. Choose which agents to enable, select models (with provider), and configure database connections — all in one streamlined form.
+- **Configs tab** — Select an existing client, view their current config, and update it without re-uploading files.
 
 ---
 
@@ -412,12 +405,10 @@ client_name: Acme Corp
 allowed_agents:
 
   sql_agent:
-    agent_id: <uuid>
-    version: v0
     enabled: true
-    model_name: llama-3.3-70b-versatile   # gpt-4o also supported
+    model_name: llama-3.3-70b-versatile
+    provider: <provider_name>
     temperature: 0
-    description: Handles sales and user activity queries.
     database:
       connection1:
         db_type: mysql          # mysql | postgres | sqlite | mssql | mariadb
@@ -435,12 +426,10 @@ allowed_agents:
         db_name: analytics_db
 
   nosql_agent:
-    agent_id: <uuid>
-    version: v0
     enabled: true
     model_name: llama-3.3-70b-versatile
+    provider: <provider_name>
     temperature: 0
-    description: Handles product catalogue queries.
     database:
       connection1:
         db_type: mongodb
@@ -451,14 +440,17 @@ allowed_agents:
         db_name: catalogue
 
   rag_agent:
-    agent_id: <uuid>
-    version: v0
     enabled: true
     model_name: llama-3.3-70b-versatile
+    provider: <provider_name>
+    temperature: 0
     top_k: 3
-    description: Answers questions from uploaded company documents.
     vector_db: faiss            # faiss | chroma
 ```
+
+**Key changes from previous versions:**
+- `provider` field is now explicit (no more string matching on model name)
+- Flattened schema — no nested `rag` or `database` objects at agent level
 
 A client with only `sql_agent` and `rag_agent` (no `nosql_agent`) will have a two-node graph — the NoSQL node simply does not exist for that client.
 
@@ -491,9 +483,10 @@ EMBEDDING_MODEL=
 VECTOR_DB_PATH=src/vector_stores
 ```
 
-**LLM provider routing** is automatic based on `model_name` in the client config:
-- Names starting with `gpt` → OpenAI (`ChatOpenAI`)
-- Names containing `llama` → Groq (`ChatGroq`)
+**LLM provider routing** is now explicit:
+- Each model in the system database has a `provider` field (`groq` or `openai`)
+- The LLM factory uses the provider field directly — no string matching
+- This supports edge-case model names like `openai-oss-120b` (Groq)
 
 The API key is read from the agent's `api_key` field first, then falls back to `LLM_API_KEY`.
 
@@ -536,9 +529,10 @@ streamlit run app.py
 ### Onboard a Client
 
 1. Log in as `SuperAdmin`.
-2. Go to **Management → Clients** and register the client.
-3. Go to **Management → Configs**, select the client, and upload their `config.yaml`.
-4. Switch to **Assistant** mode and start querying.
+2. Go to **Management → Clients** and register the client with agent selection.
+3. The client's config is created automatically during registration.
+4. To update the config later, go to **Management → Configs**, select the client, and edit.
+5. Switch to **Assistant** mode and start querying.
 
 ### Index Documents for RAG
 

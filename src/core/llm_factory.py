@@ -24,6 +24,7 @@ class LLMFactory:
     async def create(cls, llm_config: dict):
 
         model_name = llm_config["model_name"]
+        provider = llm_config["provider"]
         temperature = llm_config.get("temperature", 0)
         api_key = llm_config.get("api_key") or os.getenv("LLM_API_KEY")
 
@@ -68,14 +69,14 @@ class LLMFactory:
             )
 
             try:
-                if model_name.lower().startswith("gpt"):
+                if provider == "openai":
                     llm = ChatOpenAI(
                         model=model_name,
                         temperature=temperature,
                         api_key=api_key
                     )
 
-                elif "llama" in model_name.lower():
+                elif provider == "groq":
                     llm = ChatGroq(
                         model=model_name,
                         temperature=temperature,

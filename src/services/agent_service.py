@@ -15,15 +15,13 @@ class AgentService:
         self.agent_repo = AgentRepo(session)
 
     async def create_agent(self, agent: AgentCreate):
-        logger.info(f"[AGENT] Creating agent: {agent.agent_name}:{agent.agent_version}")
+        logger.info(f"[AGENT] Creating agent: {agent.agent_name}")
 
-        existing_agent = await self.agent_repo.get_agent_by_version(
-            agent.agent_name, agent.agent_version
-        )
+        existing_agent = await self.agent_repo.get_agent_by_name(agent.agent_name)
 
         if existing_agent:
             logger.warning(
-                f"[AGENT] Agent already exists: {agent.agent_name}:{agent.agent_version}"
+                f"[AGENT] Agent already exists: {agent.agent_name}"
             )
             raise HTTPException(status_code=400, detail="Agent already exists")
 
@@ -31,7 +29,6 @@ class AgentService:
             agent_id=str(uuid4()),
             model_id=agent.model_id,
             agent_name=agent.agent_name,
-            agent_version=agent.agent_version,
             token_limit=agent.token_limit,
             is_disabled=False,
             created_at=datetime.now(timezone.utc),

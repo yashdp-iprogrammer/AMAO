@@ -72,8 +72,7 @@ class Agent(SQLModel, table=True):
     agent_id: str = Field(primary_key=True)
     model_id: str = Field(foreign_key="models.model_id")
 
-    agent_name: str
-    agent_version: str
+    agent_name: str = Field(unique=True)
     token_limit: int
     is_disabled: bool = False
     
@@ -95,6 +94,7 @@ class Model(SQLModel, table=True):
 
     model_id: str = Field(primary_key=True)
     model_name: str = Field(index=True, unique=True)
+    provider: str = Field(max_length=35, index=True)
     token_size: int
     model_subscription: bool
     subscription_cost: float
