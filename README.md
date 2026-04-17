@@ -95,7 +95,7 @@ If files are uploaded alongside the query, they are chunked and indexed into the
 
 ```
 .
-├── app.py                          # Streamlit frontend
+├── app.py                          # Streamlit frontend (with SuperAdmin UI)
 ├── main.py                         # FastAPI app: routers, middleware, DB init, seeding
 ├── pyproject.toml                  # Dependencies (uv)
 │
@@ -376,8 +376,30 @@ JWT-based login. Token is stored in `st.session_state` for the duration of the s
 - **Upload & Index Knowledge** expander — drag-and-drop PDFs or `.txt` files and click **Build Index** to ingest them into the RAG vector store before querying.
 
 ### Super Admin Dashboard *(SuperAdmin only)*
-- **Clients tab** — Register new client organisations with dynamic agent selection. Choose which agents to enable, select models (with provider), and configure database connections — all in one streamlined form.
-- **Configs tab** — Select an existing client, view their current config, and update it without re-uploading files.
+
+#### Clients Tab — Client Registration
+Register a new client organisation with a fully dynamic configuration interface:
+
+1. **Client Details** — Full Name, Email, Phone, Password
+2. **Agent Selection** — Choose which agents to enable and configure for the client
+3. **Per-Agent Configuration:**
+   - **RAG Agent:** Configure `top_k` (number of results) and vector store backend (FAISS or ChromaDB)
+   - **SQL Agent:** Add multiple SQL database connections with type, host, port, credentials, and database name
+   - **NoSQL Agent:** Configure MongoDB connections
+4. **Dynamic UI** — Add/remove agents and database connections on-the-fly
+5. **Single Submit** — Register the client and automatically create its config file in one atomic operation
+
+#### Configs Tab — Config Management
+Edit existing client configurations without re-registering:
+
+1. **Client Selection** — Choose a client from the dropdown
+2. **View/Update** — Click to load the client's current configuration
+3. **Editable UI** — Modify agent settings and database connections dynamically
+4. **Update** — Save changes atomically back to the backend; the config file will be updated accordingly
+
+**Error Handling:**
+- Field-level validation error display (parsed from FastAPI 422 responses)
+- Clear error messages for each field
 
 ---
 
@@ -448,9 +470,9 @@ allowed_agents:
     vector_db: faiss            # faiss | chroma
 ```
 
-**Key changes from previous versions:**
-- `provider` field is now explicit (no more string matching on model name)
-- Flattened schema — no nested `rag` or `database` objects at agent level
+**Key points:**
+- `provider` field is explicit (no more string matching on model name)
+- Flattened schema — no nested objects
 
 A client with only `sql_agent` and `rag_agent` (no `nosql_agent`) will have a two-node graph — the NoSQL node simply does not exist for that client.
 
@@ -529,10 +551,11 @@ streamlit run app.py
 ### Onboard a Client
 
 1. Log in as `SuperAdmin`.
-2. Go to **Management → Clients** and register the client with agent selection.
-3. The client's config is created automatically during registration.
-4. To update the config later, go to **Management → Configs**, select the client, and edit.
-5. Switch to **Assistant** mode and start querying.
+2. Go to **Management → Clients** and fill in the client details.
+3. Use the **Agent Selection** interface to choose agents and configure their settings dynamically.
+4. Click **Register** — the client is created and their config is automatically generated.
+5. To update the config later, go to **Management → Configs**, select the client, and edit.
+6. Switch to **Assistant** mode and start querying.
 
 ### Index Documents for RAG
 
