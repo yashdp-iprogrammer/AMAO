@@ -3,6 +3,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from sqlmodel.ext.asyncio.session import AsyncSession
 from src.repositories.client_repository import ClientRepo
+from src.repositories.user_repository import UserRepo
 from src.services.config_service import ConfigService
 from src.Database.models import Client
 from src.schema.client_schema import ClientCreate, ClientUpdate
@@ -14,6 +15,7 @@ class ClientService:
     def __init__(self, session: AsyncSession):
         self.session = session
         self.client_repo = ClientRepo(session)
+        self.user_repo = UserRepo(session)
         self.config_service = ConfigService(session)
         self.hash_handler = hash_util
 
@@ -48,9 +50,8 @@ class ClientService:
         created_client = await self.client_repo.create_client(client_obj)
 
         try:
-            await self.config_service.create_config(
+            await self.config_service.upsert_config(
                 client_id=created_client.client_id,
-                client_name=created_client.client_name,
                 allowed_agents=client.allowed_agents
             )
 
@@ -84,7 +85,7 @@ class ClientService:
         
         if client.allowed_agents:
             try:
-                await self.config_service.create_config(
+                await self.config_service.upsert_config(
                     client_id=updated_client.client_id,
                     client_name=updated_client.client_name,
                     allowed_agents=client.allowed_agents
@@ -103,8 +104,8 @@ class ClientService:
             "message": "Client updated successfully",
             "client": updated_client
         }
-
-
+    
+    
     async def delete_client(self, client_id: str):
         logger.info(f"[CLIENT] Deleting client: {client_id}")
 
@@ -113,11 +114,18 @@ class ClientService:
         if not existing_client:
             raise HTTPException(status_code=404, detail="Client not found")
 
-        await self.client_repo.delete_client(existing_client)
+        await self.user_repo.delete_users_by_client_id(client_id)
 
-        logger.info(f"[CLIENT] Client deleted successfully: {client_id}")
+        existing_client.is_disabled = True
+        existing_client.updated_at = datetime.now(timezone.utc)
 
-        return {"message": "Client deleted successfully"}
+        self.session.add(existing_client)
+
+        await self.session.commit()
+
+        logger.info(f"[CLIENT] Client + Users deleted: {client_id}")
+
+        return {"message": "Client and its users deleted successfully"}
     
 
     async def get_all_clients(self, page: int, size: int):

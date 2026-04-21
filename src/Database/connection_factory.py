@@ -2,7 +2,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlmodel.ext.asyncio.session import AsyncSession
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi import HTTPException
-
+import urllib.parse
 from src.Database.base_db import Database
 from src.utils.logger import logger
 
@@ -67,7 +67,24 @@ class ConnectionFactory:
             )
 
         if db_type == "sqlite":
-            return f"{driver}:///{db.get('db_name')}"
+            return f"{driver}:////{db.get('db_name')}"
+
+
+        if db_type == "mssql":
+
+            raw_connection_string = (
+                f"Driver={{ODBC Driver 18 for SQL Server}};"
+                f"Server={db.get('host')},{db.get('port')};"
+                f"Database={db.get('db_name')};"
+                f"UID={db.get('username')};"
+                f"PWD={db.get('password')};"
+                f"TrustServerCertificate=yes;"
+                f"Encrypt=no"
+            )
+            
+            encoded_params = urllib.parse.quote_plus(raw_connection_string)
+            
+            return f"mssql+aioodbc:///?odbc_connect={encoded_params}"
 
         return (
             f"{driver}://{db.get('username')}:{db.get('password')}"
@@ -117,7 +134,7 @@ def create_sql_connection(db_config: dict):
 # MONGODB
 # =====================================================
 
-@ConnectionFactory.register("mongodb")
+@ConnectionFactory.register("mongo")
 def create_mongodb_connection(db_config: dict):
 
     logger.info("[ConnectionFactory] Initializing MongoDB connection")

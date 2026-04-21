@@ -1,10 +1,9 @@
 from fastapi import HTTPException
 from datetime import datetime, timezone
 from typing import Optional
-from src.utils.hash_util import PasswordHandler
 from src.utils.logger import logger
 from sqlmodel.ext.asyncio.session import AsyncSession
-from sqlmodel import select, func
+from sqlmodel import select, update, func
 from src.schema.user_schema import CurrentUser, UserUpdate
 from src.Database.models import User
 from src.utils.hash_util import hash_util
@@ -13,7 +12,6 @@ from src.utils.hash_util import hash_util
 class UserRepo:
     def __init__(self, session: AsyncSession):
         self.session = session
-        # self.hash_handler = PasswordHandler()
         self.hash_handler = hash_util
 
     async def create_user(self, user: User, current_user: CurrentUser):
@@ -87,6 +85,16 @@ class UserRepo:
 
         self.session.add(existing_user)
         await self.session.commit()
+        
+    async def delete_users_by_client_id(self, client_id: str):
+        await self.session.exec(
+            update(User)
+            .where(User.client_id == client_id)
+            .values(
+                is_disabled=True,
+                updated_at=datetime.now(timezone.utc)
+            )
+        )
     
   
     async def get_all_users(self, client_id: Optional[str], current_user: CurrentUser, page: int, size: int):

@@ -110,6 +110,7 @@ If files are uploaded alongside the query, they are chunked and indexed into the
 │   │   ├── chat/__init__.py        # POST /chat — main query endpoint
 │   │   ├── auth/__init__.py        # /login /register /refresh /logout /get-current-user
 │   │   ├── clients/__init__.py     # Client CRUD + atomic config creation
+│   │   ├── config/__init__.py      # Config management
 │   │   ├── agents/__init__.py      # Agent management
 │   │   ├── models/__init__.py      # LLM model management
 │   │   ├── user/__init__.py        # User management
@@ -182,7 +183,7 @@ If files are uploaded alongside the query, they are chunked and indexed into the
 ### SQL Agent
 - Extracts the full schema of all configured SQL connections (table names, column names, types) and injects it into the LLM prompt.
 - Schema is cached in-memory per connection with a 10-minute TTL to avoid repeated introspection.
-- LLM returns a JSON array of `{ connection_alias, query }` pairs.
+- LLM returns a JSON array of `{ sub_question, connection_alias, query }` objects — one per (sub-question, connection) pair.
 - All queries are executed in **parallel** via `asyncio.gather`.
 - Only `SELECT` queries are permitted — write operations are silently dropped.
 
@@ -353,12 +354,18 @@ Response: `{ "final_response": "...", "sql_agent_results": [...], ... }`
 |--------|----------|-------------|
 | `POST` | `/clients/add-client` | Register a new client organisation with config |
 | `PUT` | `/clients/update-client/{client_id}` | Update client details & config |
-| `DELETE` | `/clients/remove-client/{client_id}` | Delete a client |
+| `DELETE` | `/clients/remove-client/{client_id}` | Soft-delete a client and disable all its users |
 | `GET` | `/clients/list-clients` | Paginated client list |
 | `GET` | `/clients/get-client/{client_id}` | Get a single client |
 | `GET` | `/clients/connect/{client_id}` | Test client DB connections |
 
-**Note:** Config creation is now consolidated into the client lifecycle — config is automatically created when a client is registered, and updated when client details change.
+**Note:** Config creation is consolidated into the client lifecycle — config is automatically created or updated (`upsert`) whenever a client is registered or modified. The `config.yaml` file is the source of truth for all config reads; the database is kept in sync after every file write.
+
+### Configs *(SuperAdmin only)*
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/configs/read-config-file/{client_id}` | Read a client's current config from the YAML file |
+| `PUT` | `/configs/update-config-file/{client_id}` | Update a client's config file and sync to DB |
 
 Additional route groups: `/user`, `/feedback`, `/logs`.
 
@@ -373,7 +380,7 @@ JWT-based login. Token is stored in `st.session_state` for the duration of the s
 
 ### Assistant *(all roles)*
 - Full chat interface with message history.
-- **Upload & Index Knowledge** expander — drag-and-drop PDFs or `.txt` files and click **Build Index** to ingest them into the RAG vector store before querying.
+- **Upload & Index Knowledge** expander — drag-and-drop PDFs or `.txt` files and click **Build Index** to ingest them into the RAG vector store before querying. This expander is only shown if `rag_agent` is enabled for the client; otherwise a warning is displayed.
 
 ### Super Admin Dashboard *(SuperAdmin only)*
 
@@ -393,13 +400,13 @@ Register a new client organisation with a fully dynamic configuration interface:
 Edit existing client configurations without re-registering:
 
 1. **Client Selection** — Choose a client from the dropdown
-2. **View/Update** — Click to load the client's current configuration
+2. **View/Update** — Click to load the client's current configuration from the config file
 3. **Editable UI** — Modify agent settings and database connections dynamically
-4. **Update** — Save changes atomically back to the backend; the config file will be updated accordingly
+4. **Update** — Writes changes to the config file first, then syncs to the database
 
 **Error Handling:**
-- Field-level validation error display (parsed from FastAPI 422 responses)
-- Clear error messages for each field
+- Inline field-level validation with red captions beneath each invalid field
+- Clear error messages for each field (required fields, invalid email/phone, temperature range, top_k range)
 
 ---
 
@@ -419,7 +426,7 @@ Enforcement happens at two levels:
 
 ## Client Configuration
 
-Each client has a `config.yaml` under `src/configs/client_id_<uuid>/`. Include only the agents the client requires — the orchestrator graph is built exclusively from agents with `enabled: true`.
+Each client has a `config.yaml` under `src/configs/client_id_<uuid>/`. This file is the **source of truth** — it is read directly for all config lookups, and the database is kept in sync after every write. Include only the agents the client requires — the orchestrator graph is built exclusively from agents with `enabled: true`.
 
 ```yaml
 client_name: Acme Corp
@@ -473,6 +480,7 @@ allowed_agents:
 **Key points:**
 - `provider` field is explicit (no more string matching on model name)
 - Flattened schema — no nested objects
+- `config.yaml` is the source of truth; the DB reflects its contents
 
 A client with only `sql_agent` and `rag_agent` (no `nosql_agent`) will have a two-node graph — the NoSQL node simply does not exist for that client.
 
@@ -553,13 +561,13 @@ streamlit run app.py
 1. Log in as `SuperAdmin`.
 2. Go to **Management → Clients** and fill in the client details.
 3. Use the **Agent Selection** interface to choose agents and configure their settings dynamically.
-4. Click **Register** — the client is created and their config is automatically generated.
-5. To update the config later, go to **Management → Configs**, select the client, and edit.
+4. Click **Register** — the client is created and their config file is automatically generated.
+5. To update the config later, go to **Management → Configs**, select the client, load the current config, edit, and save.
 6. Switch to **Assistant** mode and start querying.
 
 ### Index Documents for RAG
 
-In the Assistant view, expand **Upload & Index Knowledge**, upload PDFs or `.txt` files, then click **Build Index**. Documents are chunked, deduplicated, embedded, and stored in the client's vector store automatically.
+In the Assistant view, expand **Upload & Index Knowledge**, upload PDFs or `.txt` files, then click **Build Index**. Documents are chunked, deduplicated, embedded, and stored in the client's vector store automatically. This option is only available if `rag_agent` is enabled for your client.
 
 ---
 

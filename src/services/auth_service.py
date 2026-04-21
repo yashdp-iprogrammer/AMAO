@@ -1,5 +1,5 @@
 from datetime import timedelta
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import JWTError
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -23,7 +23,11 @@ class AuthService:
     async def login(self, form_data: OAuth2PasswordRequestForm) -> dict:
 
         user = await self.auth_repo.get_user_by_email(form_data.username)
-        if not user or not self.hash_handler.verify_password(form_data.password, user.user_password):
+        if not user:
+            logger.warning(f"[LOGIN] User with email {form_data.username} does not exist")
+            raise HTTPException(status_code=404, detail="User does not exist")
+        
+        if not self.hash_handler.verify_password(form_data.password, user.user_password):
             logger.warning(f"[LOGIN] Login failed: {form_data.username}")
             raise HTTPException(status_code=401, detail="Incorrect username or password")
 

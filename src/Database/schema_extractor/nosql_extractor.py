@@ -3,7 +3,7 @@ from src.utils.logger import logger
 class NoSQLSchemaExtractor:
     def __init__(self):
         self.EXTRACTOR_MAP = {
-            "mongodb": self._extract_mongo
+            "mongo": self._extract_mongo
         }
 
     async def extract_schema(self, conn_info):

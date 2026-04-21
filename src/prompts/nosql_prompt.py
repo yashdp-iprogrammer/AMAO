@@ -107,8 +107,7 @@ FINAL OUTPUT RULE
 
 Return ONLY a valid JSON array.
 
-If the query cannot be answered using read-only operations:
-Return exactly:
-
-INVALID_QUERY
+If part of the query is answerable, generate queries ONLY for that part.
+Ignore unrelated parts.
+Return INVALID_QUERY ONLY if NO part is answerable.
 """

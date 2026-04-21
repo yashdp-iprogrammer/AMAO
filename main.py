@@ -16,6 +16,7 @@ from src.api.routes.feedback import router as feedback
 from src.api.routes.agents import router as agent
 from src.api.routes.models import router as model
 from src.api.routes.logs import router as logs
+from src.api.routes.config import router as config
 
 
 @asynccontextmanager
@@ -79,3 +80,4 @@ app.include_router(user)
 app.include_router(feedback)
 app.include_router(agent)
 app.include_router(model)
+app.include_router(config)

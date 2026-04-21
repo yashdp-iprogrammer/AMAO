@@ -4,7 +4,7 @@ from bson import ObjectId
 from src.utils.logger import logger
 
 EXECUTOR_MAP = {
-    "mongodb": run_mongo_query,
+    "mongo": run_mongo_query,
 }
 
 

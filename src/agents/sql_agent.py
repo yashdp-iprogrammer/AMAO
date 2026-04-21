@@ -92,6 +92,8 @@ class SQLAgent(BaseAgent):
         )
 
         schema_text = self._format_schema(schemas)
+        
+        print("SQL schemas:\n", schema_text)
 
         prompt = SQL_PROMPT.format(
             schema=schema_text,
@@ -104,6 +106,7 @@ class SQLAgent(BaseAgent):
 
         response = await self.llm.ainvoke(prompt)
         raw_output = response.content.strip()
+        print("SQL LLM QUERY:\n", raw_output)
 
         logger.info(
             f"[SQLAgent] LLM response received | time={time.perf_counter() - start:.2f}s"
@@ -134,7 +137,7 @@ class SQLAgent(BaseAgent):
 
         # minimal safety check
         q = query.strip().lower()
-        if not q.startswith("select") or ";" in q:
+        if not q.startswith("select"):
             logger.warning(f"[SQLAgent] Unsafe query blocked: {query}")
             return None
 

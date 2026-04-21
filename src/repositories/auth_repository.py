@@ -22,7 +22,7 @@ class AuthRepo:
     async def get_user_by_email(self, email: str) -> User | None:
         logger.info(f"In Auth Repository checking user for email {email}")
         try:
-            statement = select(User).where(User.user_email == email)
+            statement = select(User).where(User.user_email == email, User.is_disabled == False)
 
             result = await self.session.exec(statement)
             user = result.one_or_none()

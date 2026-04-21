@@ -9,6 +9,7 @@ from typing import Dict
 from src.utils.logger import logger
 from sqlmodel.ext.asyncio.session import AsyncSession
 from src.schema.agent_schema import AgentConfig
+from src.schema.client_schema import ClientUpdate
 from src.repositories.agent_repository import AgentRepo
 from src.repositories.model_repository import ModelRepo
 from src.repositories.client_repository import ClientRepo
@@ -82,20 +83,28 @@ class ConfigService:
     # -------------------------
     # CREATE CONFIG
     # -------------------------
-    async def create_config(self, client_id, client_name: str, allowed_agents: Dict[str, AgentConfig]):
+    async def upsert_config(self, client_id, allowed_agents: Dict[str, AgentConfig]):
 
         client_lock = self._client_locks[client_id]
 
         async with client_lock:
 
-            logger.info(f"[CONFIG] Creating config | client_id={client_id}")
+            logger.info(f"[CONFIG] Upserting config | client_id={client_id}")
+            
+            client = await self.client_repo.get_client_by_id(client_id)
+            if not client:
+                raise HTTPException(status_code=404, detail="Client not found")
 
+            client_name = client.client_name
             config_path = self._get_client_config_path(client_id)
             self._ensure_client_dir(client_id)
 
             agents_data = {}
 
             for agent_name, agent in allowed_agents.items():
+                
+                if isinstance(agent, dict):
+                    agent = AgentConfig(**agent)
 
                 agent_dict = {
                     "enabled": True,
@@ -131,12 +140,16 @@ class ConfigService:
                 logger.critical("[CONFIG] DB updated but file write failed")
                 raise HTTPException(status_code=500, detail="Config write failed")
 
+            try:
+                await self.client_repo.update_client(client,ClientUpdate(allowed_agents=agents_data) )
+            except Exception as e:
+                logger.exception(f"[CONFIG] DB sync failed: {e}")
 
             self._config_cache[client_id] = config_dict
 
-            logger.info(f"[CONFIG] Config created successfully | client_id={client_id}")
+            logger.info(f"[CONFIG] Config upserted successfully | client_id={client_id}")
 
-            return {"message": "Config created successfully"}
+            return {"message": "Config updated successfully"}
 
     # -------------------------
     # DELETE CONFIG

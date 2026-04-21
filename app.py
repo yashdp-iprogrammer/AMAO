@@ -1,5 +1,7 @@
+import re
 import streamlit as st
 import requests
+import time
 
 st.set_page_config(page_title="AMAO", layout="wide")
 
@@ -9,65 +11,219 @@ BASE_URL = "http://localhost:8000"
 # =====================================================
 # SESSION STATE INIT
 # =====================================================
-if "token" not in st.session_state:
-    st.session_state.token = None
+def init_state():
+    DEFAULT_STATE = {
+        "form_iter": 0,
+        "token": None,
+        "user_data": None,
+        "messages": [],
+        "logged_in": False,
+        "loaded_client_id": None,
+        "cr_agent_rows": [],
+        "cr_db_connections": {},
+        "cfg_agent_rows": [],
+        "cfg_db_connections": {},
+        "field_errors": {},
+        "cr_no_agent_warning": False,
+    }
+    for k, v in DEFAULT_STATE.items():
+        st.session_state.setdefault(k, v)
 
-if "user_data" not in st.session_state:
-    st.session_state.user_data = None
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-if "agent_rows" not in st.session_state:
-    st.session_state.agent_rows = []
-
-if "db_connections" not in st.session_state:
-    st.session_state.db_connections = {}
-
-if "form_errors" not in st.session_state:
-    st.session_state.form_errors = {}
-
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-# ✅ NEW FIX
-if "loaded_client_id" not in st.session_state:
-    st.session_state.loaded_client_id = None
-    
-
-# CLIENT REGISTRATION STATE
-if "cr_agent_rows" not in st.session_state:
-    st.session_state.cr_agent_rows = []
-
-if "cr_db_connections" not in st.session_state:
-    st.session_state.cr_db_connections = {}
-
-# CONFIG TAB STATE
-if "cfg_agent_rows" not in st.session_state:
-    st.session_state.cfg_agent_rows = []
-
-if "cfg_db_connections" not in st.session_state:
-    st.session_state.cfg_db_connections = {}
+init_state()
 
 
 # =====================================================
-# ERROR PARSER
+# FRONTEND VALIDATORS
 # =====================================================
-def parse_fastapi_error(res):
-    try:
-        data = res.json()
-    except Exception:
-        return {"_global": res.text}
+def field_input(label, key, **kwargs):
+    """text_input with an inline error caption beneath it."""
+    val = st.text_input(label, key=key, **kwargs)
+    err = st.session_state.get("field_errors", {}).get(key)
+    if err:
+        st.caption(f":red[{err}]")
+    return val
 
-    errors = {}
 
-    if "detail" in data:
-        for err in data["detail"]:
-            loc = err.get("loc", [])
-            field = loc[-1] if loc else "_global"
-            errors[field] = err.get("msg", "Invalid value")
+def err_caption(key):
+    """Render an inline red error caption for the given error key if present."""
+    err = st.session_state.get("field_errors", {}).get(key)
+    if err:
+        st.caption(f":red[{err}]")
 
-    return errors
+
+def validate_client_form(name, email, phone, password, iter):
+    errs = {}
+    if not name.strip():
+        errs[f"c_name_{iter}"] = "Required"
+    if not re.match(r"^[^@]+@[^@]+\.[^@]+$", email):
+        errs[f"c_email_{iter}"] = "Invalid email"
+    if not re.match(r"^\+?\d{7,15}$", phone.replace(" ", "")):
+        errs[f"c_phone_{iter}"] = "Invalid phone (7-15 digits)"
+    if len(password) < 8:
+        errs[f"c_pass_{iter}"] = "Min 8 characters"
+    return errs
+
+
+def validate_temperature(prefix, agent_rows):
+    errs = {}
+    for i, row in enumerate(agent_rows):
+        temp = row.get("temperature")
+
+        if temp is None or not (0 <= temp <= 2):
+            errs[f"{prefix}_temp_{i}"] = "Temperature must be between 0 and 2"
+
+    return errs
+
+
+def validate_top_k(prefix, agent_rows):
+    errs = {}
+    for i, row in enumerate(agent_rows):
+        if row.get("agent") == "rag_agent":
+            top_k = row.get("top_k")
+
+            if top_k is None or not (0 < top_k <= 20):
+                errs[f"{prefix}_topk_{i}"] = "top_k must be between 1 and 20"
+
+    return errs
+
+
+def validate_db_connections(prefix, db_connections):
+    errs = {}
+    for i, dbs in db_connections.items():
+        for j, db in enumerate(dbs):
+            if db.get("db_type") == "sqlite":
+                if not db.get("db_name", "").strip():
+                    errs[f"{prefix}_sqlite_{i}_{j}"] = "Required"
+            else:
+                for field, key in [
+                    ("host",     f"{prefix}_h_{i}_{j}"),
+                    ("username", f"{prefix}_u_{i}_{j}"),
+                    ("password", f"{prefix}_pw_{i}_{j}"),
+                    ("db_name",  f"{prefix}_dn_{i}_{j}"),
+                ]:
+                    if not db.get(field, "").strip():
+                        errs[key] = "Required"
+                if not db.get("port"):
+                    errs[f"{prefix}_p_{i}_{j}"] = "Must be a number"
+    return errs
+
+
+# =====================================================
+# DB CONNECTION RENDERER
+# =====================================================
+def render_db_connections(prefix, i, db_list, agent_type):
+    if st.button("➕ Add DB", key=f"{prefix}_add_db_{i}"):
+        st.session_state[f"{prefix}_db_connections"].setdefault(i, []).append({})
+        st.rerun()
+
+    st.session_state[f"{prefix}_db_connections"].setdefault(i, [{}])
+    db_list = st.session_state[f"{prefix}_db_connections"][i]
+
+    for j in range(len(db_list)):
+        db = db_list[j]
+
+        # 7 columns (last one for delete button)
+        dcols = st.columns([0.8, 1.2, 0.8, 1.2, 1.2, 1.8, 0.4])
+
+        db_type_key = f"{prefix}_db_{i}_{j}"
+
+        # -------------------------
+        # DB TYPE
+        # -------------------------
+        if agent_type == "sql_agent":
+            sql_types = ["mysql", "postgres", "mssql", "sqlite", "mariadb"]
+            saved_type = db.get("db_type", "mysql")
+            saved_index = sql_types.index(saved_type) if saved_type in sql_types else 0
+            db_type = dcols[0].selectbox("db_type", sql_types, index=saved_index, key=db_type_key)
+        else:
+            db_type = dcols[0].selectbox("db_type", ["mongo"], key=db_type_key)
+
+        # Define shared columns
+        dbn_col = dcols[5]
+        btn_col = dcols[6]
+
+        # -------------------------
+        # SQLITE CASE
+        # -------------------------
+        if agent_type == "sql_agent" and db_type == "sqlite":
+            sqlite_key = f"{prefix}_sqlite_{i}_{j}"
+            st.session_state.setdefault(sqlite_key, db.get("db_name", ""))
+
+            db_file = dbn_col.text_input("db_file", key=sqlite_key)
+
+            with dbn_col:
+                err_caption(sqlite_key)
+
+            st.session_state[f"{prefix}_db_connections"][i][j] = {
+                "db_type": "sqlite",
+                "db_name": db_file,
+            }
+
+        # -------------------------
+        # NORMAL DB CASE
+        # -------------------------
+        else:
+            host_key = f"{prefix}_h_{i}_{j}"
+            port_key = f"{prefix}_p_{i}_{j}"
+            user_key = f"{prefix}_u_{i}_{j}"
+            pwd_key  = f"{prefix}_pw_{i}_{j}"
+            dbn_key  = f"{prefix}_dn_{i}_{j}"
+
+            st.session_state.setdefault(host_key, db.get("host", ""))
+            st.session_state.setdefault(port_key, str(db.get("port", "") or ""))
+            st.session_state.setdefault(user_key, db.get("username", ""))
+            st.session_state.setdefault(pwd_key,  db.get("password", ""))
+            st.session_state.setdefault(dbn_key,  db.get("db_name", ""))
+
+            host = dcols[1].text_input("host", key=host_key)
+            port = dcols[2].text_input("port", key=port_key)
+            user = dcols[3].text_input("username", key=user_key)
+            pwd  = dcols[4].text_input("password", type="password", key=pwd_key)
+            dbn  = dbn_col.text_input("db_name", key=dbn_key)
+
+            # Inline errors
+            with dcols[1]: err_caption(host_key)
+            with dcols[2]: err_caption(port_key)
+            with dcols[3]: err_caption(user_key)
+            with dcols[4]: err_caption(pwd_key)
+            with dbn_col:  err_caption(dbn_key)
+
+            st.session_state[f"{prefix}_db_connections"][i][j] = {
+                "db_type":  db_type,
+                "host":     host,
+                "port":     int(port) if port.isdigit() else None,
+                "username": user,
+                "password": pwd,
+                "db_name":  dbn,
+            }
+
+        # -------------------------
+        # DELETE BUTTON (for all cases)
+        # -------------------------
+        if len(db_list) > 1:
+            with btn_col:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+
+                if st.button("✖", key=f"{prefix}_rm_db_{i}_{j}", help="Delete DB"):
+                    st.session_state[f"{prefix}_db_connections"][i].pop(j)
+                    st.rerun()
+
+
+def build_db_payload(db_list):
+    clean = []
+    for db in db_list:
+        if db.get("db_type") == "sqlite":
+            clean.append({"db_type": "sqlite", "db_name": db.get("db_name")})
+        else:
+            clean.append({
+                "db_type":  db.get("db_type"),
+                "host":     db.get("host"),
+                "port":     db.get("port"),
+                "username": db.get("username"),
+                "password": db.get("password"),
+                "db_name":  db.get("db_name"),
+            })
+    return {f"connection{i+1}": db for i, db in enumerate(clean)}
 
 
 # =====================================================
@@ -77,81 +233,49 @@ def get_headers():
     return {"Authorization": f"Bearer {st.session_state.token}"} if st.session_state.token else {}
 
 
-def api_login(username, password):
-    res = requests.post(
-        f"{BASE_URL}/login",
-        json={"username": username, "password": password}
-    )
-    res.raise_for_status()
-    return res.json()
+def api_request(method, endpoint, *, json=None, data=None, files=None, auth=True, fallback=None):
+    try:
+        res = requests.request(
+            method,
+            f"{BASE_URL}{endpoint}",
+            json=json,
+            data=data,
+            files=files,
+            headers=get_headers() if auth else {},
+        )
+        res.raise_for_status()
+        return res.json()
+    except:
+        return fallback if fallback is not None else {}
 
+
+def api_login(username, password):
+    return api_request("POST", "/login", json={"username": username, "password": password})
 
 def api_get_current_user():
-    res = requests.get(f"{BASE_URL}/get-current-user", headers=get_headers())
-    res.raise_for_status()
-    return res.json()
-
+    return api_request("GET", "/get-current-user")
 
 def api_chat(query, files=None):
-    files_payload = []
-    if files:
-        for f in files:
-            files_payload.append(("files", (f.name, f, f.type)))
-
-    res = requests.post(
-        f"{BASE_URL}/chat",
-        data={"query": query},
-        files=files_payload,
-        headers=get_headers()
-    )
-    res.raise_for_status()
-    return res.json()
-
+    files_payload = [("files", (f.name, f, f.type)) for f in files] if files else []
+    return api_request("POST", "/chat", data={"query": query}, files=files_payload)
 
 def api_get_clients():
-    res = requests.get(f"{BASE_URL}/clients/list-clients", headers=get_headers())
-    return res.json().get("data", [])
-
+    return api_request("GET", "/clients/list-clients").get("data", [])
 
 def api_get_agents():
-    try:
-        res = requests.get(f"{BASE_URL}/agents/list-agents", headers=get_headers())
-        res.raise_for_status()
-        return res.json().get("data", [])
-    except:
-        return []
-
+    return api_request("GET", "/agents/list-agents", fallback={"data": []}).get("data", [])
 
 def api_get_models():
-    try:
-        res = requests.get(f"{BASE_URL}/models/list-models", headers=get_headers())
-        res.raise_for_status()
-        return res.json().get("data", [])
-    except:
-        return []
+    return api_request("GET", "/models/list-models", fallback={"data": []}).get("data", [])
 
-
-def api_create_config(client_id, config):
-    res = requests.post(
-        f"{BASE_URL}/configs/create-config-file/{client_id}",
-        json=config,
-        headers=get_headers()
-    )
-    res.raise_for_status()
-    return res.json()
-
-
-def api_read_config(client_id):
-    res = requests.get(f"{BASE_URL}/configs/read-config/{client_id}", headers=get_headers())
-    return res.json()
-
+def api_get_client_config(client_id):
+    return api_request("GET", f"/configs/read-config-file/{client_id}") 
 
 # =====================================================
 # LOGIN UI
 # =====================================================
 def login_ui():
-    st.markdown("<h1 style='text-align: center;'>🚀 AMAO Enterprise Login</h1>", unsafe_allow_html=True)
-
+    st.markdown("<h1 style='text-align: center;'>AMAO Enterprise Login</h1>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1, 2, 1])
 
     with col2:
@@ -176,13 +300,30 @@ def login_ui():
 def assistant_ui(user):
     st.title("🤖 Intelligent Assistant")
 
+    # with st.expander("📥 Upload & Index Knowledge"):
+    #     files = st.file_uploader("Upload Documents", accept_multiple_files=True)
+    #     if st.button("Build Index") and files:
+    #         with st.spinner("Processing..."):
+    #             api_chat("indexing_request", files)
+    #             st.toast("Indexed!", icon="✅")
+    
     with st.expander("📥 Upload & Index Knowledge"):
-        files = st.file_uploader("Upload Documents", accept_multiple_files=True)
 
-        if st.button("Build Index") and files:
-            with st.spinner("Processing..."):
-                api_chat("indexing_request", files)
-                st.success("Indexed!")
+        client_id = st.session_state.user_data.get("client_id")
+        print(f"Client id is: {client_id}")
+        config = api_get_client_config(client_id)
+        print(f"config is: {config}")
+        rag_enabled = config.get("allowed_agents", {}).get("rag_agent", {}).get("enabled", False)
+
+        if not rag_enabled:
+            st.warning("RAG is not enabled for your client. Contact admin.")
+        else:
+            files = st.file_uploader("Upload Documents", accept_multiple_files=True)
+
+            if st.button("Build Index") and files:
+                with st.spinner("Processing..."):
+                    api_chat("indexing_request", files)
+                    st.toast("Indexed!", icon="✅")
 
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
@@ -190,558 +331,303 @@ def assistant_ui(user):
 
     if prompt := st.chat_input("Ask..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
-
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.spinner("Thinking..."):
             res = api_chat(prompt)
             reply = res.get("final_response", "")
-
             st.session_state.messages.append({"role": "assistant", "content": reply})
-
             with st.chat_message("assistant"):
                 st.markdown(reply)
+
+
+# =====================================================
+# SHARED AGENT EDITOR
+# =====================================================
+def render_agent_rows(prefix, agent_names, model_names, model_map):
+    """Renders agent configuration rows for both create and config tabs."""
+
+    if st.button("➕ Add Agent", key=f"{prefix}_add_agent"):
+        st.session_state[f"{prefix}_agent_rows"].append({})
+        st.rerun()
+
+    for i in range(len(st.session_state[f"{prefix}_agent_rows"])):
+        row = st.session_state[f"{prefix}_agent_rows"][i]
+        st.markdown("---")
+
+        # r1, r2 = st.columns([10, 1])
+        # r1.markdown("### Agent Configuration")
+        # if r2.button("✖", key=f"{prefix}_del_{i}"):
+        #     st.session_state[f"{prefix}_agent_rows"].pop(i)
+        #     st.session_state[f"{prefix}_db_connections"].pop(i, None)
+        #     st.rerun()
+        
+        header_cols = st.columns([8, 1])
+
+        with header_cols[0]:
+            st.markdown("### Agent Configuration")
+
+        with header_cols[1]:
+            st.write("")  # small vertical alignment trick
+            if st.button("✖", key=f"{prefix}_del_{i}"):
+                st.session_state[f"{prefix}_agent_rows"].pop(i)
+                st.session_state[f"{prefix}_db_connections"].pop(i, None)
+                st.rerun()
+
+        cols = st.columns(3)
+
+        agent = cols[0].selectbox(
+            "Agent", agent_names,
+            index=agent_names.index(row["agent"]) if row.get("agent") in agent_names else 0,
+            key=f"{prefix}_agent_{i}",
+        )
+        model = cols[1].selectbox(
+            "Model", model_names,
+            index=model_names.index(row["model"]) if row.get("model") in model_names else 0,
+            key=f"{prefix}_model_{i}",
+        )
+        
+        temp_key = f"{prefix}_temp_{i}"
+        temp = cols[2].number_input("Temp", value=row.get("temperature", 0.7), key=temp_key)
+
+        with cols[2]:
+            err_caption(temp_key)
+    
+        # temp = cols[2].number_input("Temp", value=row.get("temperature", 0.7), key=f"{prefix}_temp_{i}")
+
+        row_data = {
+            "agent":       agent,
+            "model":       model,
+            "provider":    model_map.get(model, {}).get("provider"),
+            "temperature": temp,
+        }
+
+        if agent == "rag_agent":
+            st.markdown("##### RAG Configuration")
+            rcols = st.columns(2)
+            
+            topk_key = f"{prefix}_topk_{i}"
+            row_data["top_k"] = rcols[0].number_input(
+                "top_k", min_value=1, step=1,
+                value=row.get("top_k", 3),
+                key=topk_key,
+            )
+            with rcols[0]:
+                err_caption(topk_key)
+                
+            row_data["vector_db"] = rcols[1].selectbox(
+                "vector_db", ["faiss", "chroma"],
+                index=["faiss", "chroma"].index(row.get("vector_db", "faiss")),
+                key=f"{prefix}_vdb_{i}",
+            )
+
+        if agent in ["sql_agent", "nosql_agent"]:
+            st.markdown("##### Database Connections")
+            if row.get("agent") != agent:
+                st.session_state[f"{prefix}_db_connections"][i] = [{}]
+            render_db_connections(prefix, i, st.session_state[f"{prefix}_db_connections"].get(i, []), agent)
+
+        st.session_state[f"{prefix}_agent_rows"][i].update(row_data)
+
+
+def collect_agent_config(prefix, model_map):
+    """Builds the allowed_agents config dict from session state."""
+    config = {}
+    for i, row in enumerate(st.session_state[f"{prefix}_agent_rows"]):
+        agent = row.get("agent")
+        model = row.get("model")
+        if not agent or not model:
+            continue
+
+        base = {
+            "model_name":  model,
+            "provider":    model_map.get(model, {}).get("provider"),
+            "temperature": row.get("temperature", 0.7),
+        }
+
+        if agent == "rag_agent":
+            base["top_k"]     = row.get("top_k", 3)
+            base["vector_db"] = row.get("vector_db", "faiss")
+
+        if agent in ["sql_agent", "nosql_agent"]:
+            dbs = st.session_state[f"{prefix}_db_connections"].get(i, [])
+            base["database"] = build_db_payload(dbs)
+
+        config[agent] = base
+    return config
 
 
 # =====================================================
 # SUPERADMIN UI
 # =====================================================
 def superadmin_ui():
-    st.title("🛠️ Super Admin Dashboard")
+    st.title("Super Admin Dashboard")
 
-    tab1, tab2 = st.tabs(["🏢 Clients", "⚙️ Configs"])
+    tab1, tab2 = st.tabs(["Clients", "Configs"])
+
+    agents      = api_get_agents()
+    models      = api_get_models()
+    agent_names = [a["agent_name"] for a in agents]
+    model_names = [m["model_name"] for m in models]
+    model_map   = {m["model_name"]: m for m in models}
 
     # =================================================
-    # CLIENT REGISTRATION (FINAL STABLE VERSION)
+    # CLIENT REGISTRATION
     # =================================================
     with tab1:
         st.subheader("Client Registration")
+        
+        iter = st.session_state.form_iter
 
-        agents = api_get_agents()
-        models = api_get_models()
+        c_name  = field_input("Full Name", f"c_name_{iter}")
+        c_email = field_input("Email",     f"c_email_{iter}")
+        c_phone = field_input("Phone",     f"c_phone_{iter}")
+        c_pass  = field_input("Password",  f"c_pass_{iter}", type="password")
 
-        agent_names = [a["agent_name"] for a in agents]
-        model_names = [m["model_name"] for m in models]
-        model_map = {m["model_name"]: m for m in models}
+        render_agent_rows("cr", agent_names, model_names, model_map)
 
-        c_name = st.text_input("Full Name")
-        c_email = st.text_input("Email")
-        c_phone = st.text_input("Phone")
-        c_pass = st.text_input("Password", type="password")
-
-        st.markdown("### Allowed Agents")
-
-        # ADD AGENT
-        if st.button("➕ Add Agent", key="cr_add_agent"):
-            st.session_state.cr_agent_rows.append({"id": len(st.session_state.cr_agent_rows)})
-
-        # =============================
-        # AGENT LOOP
-        # =============================
-        for i, row in enumerate(st.session_state.cr_agent_rows):
-
-            st.markdown("---")
-
-            r1, r2 = st.columns([10, 1])
-            with r1:
-                st.markdown("### Agent Configuration")
-            with r2:
-                if st.button("✖", key=f"cr_del_{i}"):
-                    st.session_state.cr_agent_rows.pop(i)
-                    st.session_state.cr_db_connections.pop(i, None)
-                    st.rerun()
-
-            # ---------------------------
-            # STABLE DEFAULT VALUES
-            # ---------------------------
-            agent_key = f"cr_agent_{i}"
-            model_key = f"cr_model_{i}"
-            temp_key = f"cr_temp_{i}"
-
-            if agent_key not in st.session_state:
-                st.session_state[agent_key] = agent_names[0] if agent_names else None
-
-            if model_key not in st.session_state:
-                st.session_state[model_key] = model_names[0] if model_names else None
-
-            if temp_key not in st.session_state:
-                st.session_state[temp_key] = 0.7
-
-            cols = st.columns(3)
-
-            agent = cols[0].selectbox("Agent", agent_names, key=agent_key)
-            model = cols[1].selectbox("Model", model_names, key=model_key)
-            temp = cols[2].number_input("Temp", key=temp_key)
-
-            provider = model_map.get(model, {}).get("provider")
-
-            # =============================
-            # RAG
-            # =============================
-            if agent == "rag_agent":
-                st.markdown("##### RAG Configuration")
-
-                topk_key = f"cr_topk_{i}"
-                vdb_key = f"cr_vdb_{i}"
-
-                if topk_key not in st.session_state:
-                    st.session_state[topk_key] = 3
-
-                if vdb_key not in st.session_state:
-                    st.session_state[vdb_key] = "faiss"
-
-                rcols = st.columns(2)
-
-                # rcols[0].number_input("top_k", key=topk_key)
-                rcols[0].number_input(
-                    "top_k",
-                    min_value=1,
-                    step=1,
-                    # value=int(st.session_state.get(topk_key, 3)),
-                    key=topk_key
-                )
-                rcols[1].selectbox("vector_db", ["faiss", "chroma"], key=vdb_key)
-
-            # =============================
-            # SQL AGENT
-            # =============================
-            elif agent == "sql_agent":
-                st.markdown("##### Database Connections")
-
-                if st.button("➕ Add DB", key=f"cr_add_db_{i}"):
-                    st.session_state.cr_db_connections.setdefault(i, []).append({})
-
-                st.session_state.cr_db_connections.setdefault(i, [{}])
-                db_list = st.session_state.cr_db_connections[i]
-
-                for j in range(len(db_list)):
-
-                    db = db_list[j]
-
-                    dcols = st.columns([1,1,1,1,1,1,0.5])
-
-                    db_key = f"cr_db_{i}_{j}"
-                    host_key = f"cr_h_{i}_{j}"
-                    port_key = f"cr_p_{i}_{j}"
-                    user_key = f"cr_u_{i}_{j}"
-                    pwd_key = f"cr_pw_{i}_{j}"
-                    dbn_key = f"cr_dn_{i}_{j}"
-
-                    # defaults
-                    st.session_state.setdefault(db_key, db.get("db_type", "mysql"))
-                    st.session_state.setdefault(host_key, db.get("host", ""))
-                    st.session_state.setdefault(port_key, str(db.get("port", "")))
-                    st.session_state.setdefault(user_key, db.get("username", ""))
-                    st.session_state.setdefault(pwd_key, db.get("password", ""))
-                    st.session_state.setdefault(dbn_key, db.get("db_name", ""))
-
-                    db_type = dcols[0].selectbox(
-                        "db_type",
-                        ["mysql","postgres","mssql","sqlite","mariadb"],
-                        key=db_key
-                    )
-
-                    host = dcols[1].text_input("host", key=host_key)
-                    port = dcols[2].text_input("port", key=port_key)
-                    user = dcols[3].text_input("username", key=user_key)
-                    pwd = dcols[4].text_input("password", type="password", key=pwd_key)
-                    dbn = dcols[5].text_input("db_name", key=dbn_key)
-
-                    with dcols[6]:
-                        if len(db_list) > 1:
-                            if st.button("✖", key=f"cr_rm_db_{i}_{j}"):
-                                st.session_state.cr_db_connections[i].pop(j)
-                                st.rerun()
-
-                    st.session_state.cr_db_connections[i][j] = {
-                        "db_type": db_type,
-                        "host": host,
-                        "port": int(port) if port.isdigit() else None,
-                        "username": user,
-                        "password": pwd,
-                        "db_name": dbn
-                    }
-
-            # =============================
-            # NOSQL AGENT 
-            # =============================
-            elif agent == "nosql_agent":
-                st.markdown("##### Database Connections")
-
-                # ➕ ADD DB BUTTON
-                if st.button("➕ Add DB", key=f"cr_add_nosql_db_{i}"):
-                    st.session_state.cr_db_connections.setdefault(i, []).append({})
-
-                # Ensure at least 1 connection exists
-                st.session_state.cr_db_connections.setdefault(i, [{}])
-                db_list = st.session_state.cr_db_connections[i]
-
-                for j in range(len(db_list)):
-
-                    db = db_list[j]
-
-                    dcols = st.columns([1,1,1,1,1,1,0.5])
-
-                    # Keys
-                    ndb_key = f"cr_ndb_{i}_{j}"
-                    nh_key = f"cr_nh_{i}_{j}"
-                    np_key = f"cr_np_{i}_{j}"
-                    nu_key = f"cr_nu_{i}_{j}"
-                    npw_key = f"cr_npw_{i}_{j}"
-                    nd_key = f"cr_nd_{i}_{j}"
-
-                    # Defaults
-                    st.session_state.setdefault(ndb_key, db.get("db_type", "mongo"))
-                    st.session_state.setdefault(nh_key, db.get("host", ""))
-                    st.session_state.setdefault(np_key, str(db.get("port", "")))
-                    st.session_state.setdefault(nu_key, db.get("username", ""))
-                    st.session_state.setdefault(npw_key, db.get("password", ""))
-                    st.session_state.setdefault(nd_key, db.get("db_name", ""))
-
-                    # Inputs
-                    db_type = dcols[0].selectbox("db_type", ["mongo"], key=ndb_key)
-                    host = dcols[1].text_input("host", key=nh_key)
-                    port = dcols[2].text_input("port", key=np_key)
-                    user = dcols[3].text_input("username", key=nu_key)
-                    pwd = dcols[4].text_input("password",  type="password", key=npw_key)
-                    dbn = dcols[5].text_input("db_name", key=nd_key)
-
-                    # ❌ REMOVE BUTTON (only if >1)
-                    with dcols[6]:
-                        if len(db_list) > 1:
-                            if st.button("✖", key=f"cr_rm_nosql_db_{i}_{j}"):
-                                st.session_state.cr_db_connections[i].pop(j)
-                                st.rerun()
-
-                    # Save back
-                    st.session_state.cr_db_connections[i][j] = {
-                        "db_type": db_type,
-                        "host": host,
-                        "port": int(port) if port.isdigit() else None,
-                        "username": user,
-                        "password": pwd,
-                        "db_name": dbn
-                    }
-
-        # =============================
-        # SUBMIT
-        # =============================
+        if st.session_state.get("cr_no_agent_warning"):
+            st.warning("Please add at least one agent before registering.")
+        
+        
         if st.button("Register", use_container_width=True):
+            # 1. Check if rows actually exist
+            no_agents = not st.session_state.cr_agent_rows
+            
+            # 2. Field Validations (Name, Email, etc.)
+            iter = st.session_state.form_iter
+            field_errs = validate_client_form(c_name, c_email, c_phone, c_pass, iter)
+            
+            # 3. Targeted DB Validation
+            # Only validate DB connections for rows where the agent is SQL or NoSQL
+            relevant_db_errs = {}
+            for i, row in enumerate(st.session_state.cr_agent_rows):
+                agent_type = row.get("agent")
+                if agent_type in ["sql_agent", "nosql_agent"]:
+                    # Only validate if this specific row index has DB data
+                    specific_db_data = {i: st.session_state.cr_db_connections.get(i, [{}])}
+                    relevant_db_errs.update(validate_db_connections("cr", specific_db_data))
+            
+            temp_errs = validate_temperature("cr", st.session_state.cr_agent_rows)
+            topk_errs = validate_top_k("cr", st.session_state.cr_agent_rows)
 
-            config = {}
+            all_errs = {**field_errs, **relevant_db_errs, **temp_errs, **topk_errs}
+            
+            st.session_state.field_errors = all_errs
+            st.session_state["cr_no_agent_warning"] = no_agents
+            
+            if all_errs or no_agents:
+                st.rerun()
 
-            for i in range(len(st.session_state.cr_agent_rows)):
-
-                agent = st.session_state.get(f"cr_agent_{i}")
-                model = st.session_state.get(f"cr_model_{i}")
-                temp = st.session_state.get(f"cr_temp_{i}", 0.7)
-
-                if not agent or not model:
-                    continue
-
-                base = {
-                    "model_name": model,
-                    "provider": model_map.get(model, {}).get("provider"),
-                    "temperature": temp
+            # 4. API Call
+            if not all_errs and not no_agents:
+                payload = {
+                    "client_name":   c_name,
+                    "client_email":  c_email,
+                    "phone":         c_phone,
+                    "password":      c_pass,
+                    "allowed_agents": collect_agent_config("cr", model_map),
                 }
-
-                if agent == "rag_agent":
-                    base["top_k"] = st.session_state.get(f"cr_topk_{i}", 3)
-                    base["vector_db"] = st.session_state.get(f"cr_vdb_{i}", "faiss")
-
-                if agent in ["sql_agent", "nosql_agent"]:
-                    dbs = st.session_state.cr_db_connections.get(i, [])
-                    base["database"] = {
-                        f"connection{idx+1}": db for idx, db in enumerate(dbs)
-                    }
-
-                config[agent] = base
-
-            payload = {
-                "client_name": c_name,
-                "client_email": c_email,
-                "phone": c_phone,
-                "password": c_pass,
-                "allowed_agents": config
-            }
-
-            res = requests.post(
-                f"{BASE_URL}/clients/add-client",
-                json=payload,
-                headers=get_headers()
-            )
-
-            if not res.ok:
-                st.error(res.text)
-                return
-
-            st.success("Client registered successfully!")
-
-            # RESET ONLY THIS TAB
-            st.session_state.cr_agent_rows = []
-            st.session_state.cr_db_connections = {}
+                
+                try:
+                    res = requests.post(
+                        f"{BASE_URL}/clients/add-client", 
+                        json=payload, 
+                        headers=get_headers(),
+                        timeout=10
+                    )
+                    if res.ok:
+                        st.success("Client registered successfully! ✅")
+                        
+                        st.session_state.form_iter += 1
+                        # Reset states
+                        st.session_state.cr_agent_rows = []
+                        st.session_state.cr_db_connections = {}
+                        st.session_state.field_errors = {}
+                        st.session_state["cr_no_agent_warning"] = False
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        error_data = res.json()
+                        st.error(f"Registration failed: {error_data.get('detail', 'Unknown error')}")
+                except Exception as e:
+                    st.error(f"Connection Error: {e}")
 
     # =================================================
-    # CONFIG TAB (FIXED)
+    # CONFIG TAB
     # =================================================
     with tab2:
         st.subheader("Global Configs")
 
-        clients = api_get_clients()
-        cmap = {c["client_name"]: c["client_id"] for c in clients}
+        clients  = api_get_clients()
+        cmap     = {c["client_name"]: c["client_id"] for c in clients}
 
-        c1, c2 = st.columns([3, 1])
+        c1, c2   = st.columns([3, 1], vertical_alignment="bottom")
+        selected = c1.selectbox("Client", list(cmap.keys()))
 
-        with c1:
-            selected = st.selectbox("Client", list(cmap.keys()))
-
-        with c2:
-            load_btn = st.button("View / Update Config", key="cfg_load_btn")
-
-        # RESET ON CLIENT CHANGE
         if selected:
             cid = cmap[selected]
             if st.session_state.loaded_client_id != cid:
-                st.session_state.cfg_agent_rows = []
+                st.session_state.cfg_agent_rows    = []
                 st.session_state.cfg_db_connections = {}
-                st.session_state.loaded_client_id = None
+                st.session_state.loaded_client_id  = None
 
-        # LOAD CONFIG
-        if load_btn and selected:
+        st.markdown("<div style='height: 38px;'></div>", unsafe_allow_html=True)
+
+        if c2.button("View / Update Config", key="cfg_load_btn") and selected:
             cid = cmap[selected]
-
-            res = requests.get(
-                f"{BASE_URL}/clients/get-client/{cid}",
-                headers=get_headers()
-            )
+            res = requests.get(f"{BASE_URL}/configs/read-config-file/{cid}", headers=get_headers())
             res.raise_for_status()
-            client_data = res.json()
 
-            allowed_agents = client_data.get("allowed_agents", {})
-
-            st.session_state.cfg_agent_rows = []
+            allowed_agents = res.json().get("allowed_agents", {})
+            st.session_state.cfg_agent_rows    = []
             st.session_state.cfg_db_connections = {}
 
             for i, (agent_name, cfg) in enumerate(allowed_agents.items()):
                 row = {
-                    "agent": agent_name,
-                    "model": cfg.get("model_name"),
-                    "provider": cfg.get("provider"),
-                    "temperature": cfg.get("temperature", 0.7)
+                    "agent":       agent_name,
+                    "model":       cfg.get("model_name"),
+                    "provider":    cfg.get("provider"),
+                    "temperature": cfg.get("temperature", 0.7),
                 }
-
-                if "top_k" in cfg:
-                    row["top_k"] = cfg.get("top_k")
-
-                if "vector_db" in cfg:
-                    row["vector_db"] = cfg.get("vector_db")
-
-                if "database" in cfg:
+                if "top_k"     in cfg: row["top_k"]     = cfg["top_k"]
+                if "vector_db" in cfg: row["vector_db"] = cfg["vector_db"]
+                if "database"  in cfg:
                     st.session_state.cfg_db_connections[i] = list(cfg["database"].values())
 
                 st.session_state.cfg_agent_rows.append(row)
 
             st.session_state.loaded_client_id = cid
-            st.success("Config loaded!")
+            st.toast("Config loaded!", icon="✅")
 
-        # RENDER
-        if (
-            selected
-            and st.session_state.loaded_client_id == cmap[selected]
-        ):
+        if selected and st.session_state.loaded_client_id == cmap.get(selected):
             st.markdown("### Edit Configuration")
+            render_agent_rows("cfg", agent_names, model_names, model_map)
 
-            agents = api_get_agents()
-            models = api_get_models()
-
-            agent_names = [a["agent_name"] for a in agents]
-            model_names = [m["model_name"] for m in models]
-            model_map = {m["model_name"]: m for m in models}
-
-            # ➕ ADD AGENT
-            if st.button("➕ Add Agent", key="cfg_add_agent"):
-                st.session_state.cfg_agent_rows.append({
-                    "agent": agent_names[0] if agent_names else None,
-                    "model": model_names[0] if model_names else None,
-                    "provider": None,
-                    "temperature": 0.7
-                })
-                st.rerun()
-
-            # LOOP
-            for i in range(len(st.session_state.cfg_agent_rows)):
-                st.markdown("---")
-
-                row = st.session_state.cfg_agent_rows[i]
-
-                r1, r2 = st.columns([10, 1])
-
-                with r1:
-                    st.markdown("### Agent Configuration")
-
-                with r2:
-                    if st.button("✖", key=f"cfg_del_{i}"):
-                        st.session_state.cfg_agent_rows.pop(i)
-                        st.session_state.cfg_db_connections.pop(i, None)
-                        st.rerun()
-
-                cols = st.columns(3)
-
-                # SAFE SELECTBOXES
-                agent = cols[0].selectbox(
-                    "Agent",
-                    agent_names,
-                    index=agent_names.index(row["agent"]) if row.get("agent") in agent_names else 0,
-                    key=f"cfg_agent_{i}"
-                )
-
-                model = cols[1].selectbox(
-                    "Model",
-                    model_names,
-                    index=model_names.index(row["model"]) if row.get("model") in model_names else 0,
-                    key=f"cfg_model_{i}"
-                )
-
-                provider = model_map.get(model, {}).get("provider")
-
-                temp = cols[2].number_input(
-                    "Temp",
-                    value=row.get("temperature", 0.7),
-                    key=f"cfg_temp_{i}"
-                )
-
-                # RESET DB IF AGENT TYPE CHANGES
-                prev_agent = row.get("agent")
-                if prev_agent != agent:
-                    st.session_state.cfg_db_connections[i] = [{}]
-
-                row_data = {
-                    "agent": agent,
-                    "model": model,
-                    "provider": provider,
-                    "temperature": temp
-                }
-
-                # =============================
-                # RAG
-                # =============================
-                if agent == "rag_agent":
-                    st.markdown("##### RAG Configuration")
-
-                    rcols = st.columns(2)
-
-                    row_data["top_k"] = rcols[0].number_input(
-                        "top_k",
-                        min_value=1,
-                        step=1,
-                        # value=int(row.get("top_k", 3)),
-                        key=f"edit_topk_{st.session_state.loaded_client_id}_{i}"
-                    )
-
-                    row_data["vector_db"] = rcols[1].selectbox(
-                        "vector_db",
-                        ["faiss", "chroma"],
-                        index=["faiss", "chroma"].index(row.get("vector_db", "faiss")),
-                        key=f"cfg_vdb_{i}"
-                    )
-
-                # =============================
-                # SQL + NOSQL
-                # =============================
-                if agent in ["sql_agent", "nosql_agent"]:
-                    st.markdown("##### Database Connections")
-
-                    # ➕ ADD DB
-                    if st.button("➕ Add DB", key=f"cfg_add_db_{i}"):
-                        st.session_state.cfg_db_connections.setdefault(i, []).append({})
-                        st.rerun()
-
-                    st.session_state.cfg_db_connections.setdefault(i, [{}])
-                    db_list = st.session_state.cfg_db_connections[i]
-
-                    for j in range(len(db_list)):
-                        db = db_list[j]
-
-                        dcols = st.columns([1,1,1,1,1,1,0.5])
-
-                        # db_type FIX
-                        if agent == "sql_agent":
-                            db_type = dcols[0].selectbox(
-                                "db_type",
-                                ["mysql","postgres","mssql","sqlite","mariadb"],
-                                index=["mysql","postgres","mssql","sqlite","mariadb"].index(db.get("db_type","mysql")) if db.get("db_type") in ["mysql","postgres","mssql","sqlite","mariadb"] else 0,
-                                key=f"cfg_db_{i}_{j}"
-                            )
-                        else:
-                            db_type = dcols[0].selectbox(
-                                "db_type",
-                                ["mongo"],
-                                index=0,
-                                key=f"cfg_db_{i}_{j}"
-                            )
-
-                        host = dcols[1].text_input("host", value=db.get("host",""), key=f"cfg_h_{i}_{j}")
-                        port = dcols[2].text_input("port", value=str(db.get("port","")), key=f"cfg_p_{i}_{j}")
-                        user = dcols[3].text_input("username", value=db.get("username",""), key=f"cfg_u_{i}_{j}")
-                        pwd = dcols[4].text_input("password", type="password", value=db.get("password",""), key=f"cfg_pw_{i}_{j}")
-                        dbn = dcols[5].text_input("db_name", value=db.get("db_name",""), key=f"cfg_dn_{i}_{j}")
-
-                        # REMOVE DB
-                        with dcols[6]:
-                            if len(db_list) > 1:
-                                if st.button("✖", key=f"cfg_rm_db_{i}_{j}"):
-                                    st.session_state.cfg_db_connections[i].pop(j)
-                                    st.rerun()
-
-                        st.session_state.cfg_db_connections[i][j] = {
-                            "db_type": db_type,
-                            "host": host,
-                            "port": int(port) if port.isdigit() else None,
-                            "username": user,
-                            "password": pwd,
-                            "db_name": dbn
-                        }
-
-                st.session_state.cfg_agent_rows[i].update(row_data)
-
-            # =============================
-            # UPDATE CONFIG
-            # =============================
             if st.button("Update Config", key="cfg_update_btn"):
-                updated_config = {}
+                
+                db_errs   = validate_db_connections("cfg", st.session_state.cfg_db_connections)
+                temp_errs = validate_temperature("cfg", st.session_state.cfg_agent_rows)
+                topk_errs = validate_top_k("cfg", st.session_state.cfg_agent_rows)
 
-                for i, row in enumerate(st.session_state.cfg_agent_rows):
-                    agent = row["agent"]
-
-                    base = {
-                        "model_name": row["model"],
-                        "provider": row["provider"],
-                        "temperature": row["temperature"]
-                    }
-
-                    if agent == "rag_agent":
-                        base["top_k"] = row["top_k"]
-                        base["vector_db"] = row["vector_db"]
-
-                    if agent in ["sql_agent", "nosql_agent"]:
-                        dbs = st.session_state.cfg_db_connections.get(i, [])
-                        base["database"] = {
-                            f"connection{idx+1}": db for idx, db in enumerate(dbs)
-                        }
-
-                    updated_config[agent] = base
-
-                cid = cmap[selected]
-
-                res = requests.put(
-                    f"{BASE_URL}/clients/update-client/{cid}",
-                    json={"allowed_agents": updated_config},
-                    headers=get_headers()
-                )
-
-                res.raise_for_status()
-                st.success("Config updated successfully!")
+                errs = {**db_errs, **temp_errs, **topk_errs}
+                
+                st.session_state.field_errors = errs
+                if not errs:
+                    cid = cmap[selected]
+                    res = requests.put(
+                        f"{BASE_URL}/configs/update-config-file/{cid}",
+                        json={"allowed_agents": collect_agent_config("cfg", model_map)},
+                        headers=get_headers(),
+                    )
+                    if res.ok:
+                        st.toast("Config updated successfully!", icon="✅")
+                        st.session_state.field_errors = {}
+                        time.sleep(2)
+                    else:
+                        st.error(f"Update failed: {res.text}")
+                st.rerun()
 
 
 # =====================================================
@@ -752,7 +638,7 @@ def main():
         login_ui()
         return
 
-    user = st.session_state.user_data
+    user     = st.session_state.user_data
     is_super = user["role_name"].lower() == "superadmin"
 
     with st.sidebar:

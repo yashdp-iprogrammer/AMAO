@@ -1,0 +1,56 @@
+from fastapi import APIRouter, Depends
+from src.schema.config_schema import ConfigUpdate
+from src.Database import system_db as db
+from src.services.config_service import ConfigService
+from sqlmodel.ext.asyncio.session import AsyncSession
+from typing import Annotated
+from src.security.o_auth import auth_dependency
+from src.utils.logger import logger
+
+
+router = APIRouter(prefix="/configs", tags=["Configs"])
+
+def get_config_service(session: AsyncSession = Depends(db.get_session)) -> ConfigService:
+    return ConfigService(session)
+
+config_session = Annotated[ConfigService, Depends(get_config_service)]
+
+
+@router.get("/read-config-file/{client_id}")
+def read_config(
+    client_id: str,
+    config_service: config_session,
+    current_user=Depends(auth_dependency.require_roles(["SuperAdmin"]))
+):
+    logger.info(f"[READ_CONFIG] user={current_user}, client_id={client_id}")
+
+    result = config_service.read_config(client_id)
+
+    return result
+
+
+@router.put("/update-config-file/{client_id}")
+async def update_config_file(
+    client_id: str,
+    config: ConfigUpdate,
+    config_service: config_session,
+    current_user=Depends(auth_dependency.require_roles(["SuperAdmin"]))
+):
+    logger.info(f"[UPDATE_CONFIG] user={current_user}, client_id={client_id}")
+
+    result = await config_service.upsert_config(client_id, config.allowed_agents)
+
+    return result
+
+
+@router.delete("/remove-config-file/{client_id}")
+async def remove_config_file(
+    client_id: str,
+    config_service: config_session,
+    current_user=Depends(auth_dependency.require_roles(["SuperAdmin"]))
+):
+    logger.info(f"[DELETE_CONFIG] user={current_user}, client_id={client_id}")
+
+    result = await config_service.remove_config(client_id)
+
+    return result

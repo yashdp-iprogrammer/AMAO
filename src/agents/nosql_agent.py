@@ -95,6 +95,8 @@ class NoSQLAgent(BaseAgent):
         )
 
         schema_text = self._format_schema(schemas)
+        
+        print("No sql schema:\n", schema_text)
 
         prompt = NOSQL_PROMPT.format(
             schema=schema_text,
@@ -107,6 +109,7 @@ class NoSQLAgent(BaseAgent):
 
         response = await self.llm.ainvoke(prompt)
         raw = response.content.strip()
+        print("NOSQL LLM QUERY:\n", raw)
 
         logger.info(
             f"[NoSQLAgent] LLM response received | time={time.perf_counter() - start:.2f}s"

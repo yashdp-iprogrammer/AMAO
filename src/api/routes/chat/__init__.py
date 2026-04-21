@@ -52,8 +52,11 @@ async def run_chat(
         logger.info(f"[ChatRoute] Processing {len(files)} uploaded files")
 
         rag_config = config["allowed_agents"].get("rag_agent")
-
-        if rag_config and rag_config.get("enabled"):
+        
+        if not (rag_config and rag_config.get("enabled")):
+            logger.warning(f"RAG not enabled for client {client_id}, skipping indexing")
+    
+        else:
 
             vector_db_type = rag_config.get("vector_db", "faiss")
 
