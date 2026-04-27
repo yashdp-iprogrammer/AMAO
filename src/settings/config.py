@@ -24,5 +24,5 @@ config = Config()
 
 logger.info(
     f"Config loaded | DB Host={config.DATABASE_HOST}, DB Name={config.DATABASE_NAME}, "
-    f"Embedding Model={config.EMBEDDING_MODEL}, LLM Model={config.LLM_MODEL}"
+    f"Embedding Model={config.EMBEDDING_MODEL}"
 )

@@ -54,8 +54,10 @@ Each client organisation has its own isolated configuration: which agents are ac
                         │
                         ▼
 ┌──────────────────────────────────────────────────────┐
-│               GraphManager (per-client cache)        │
+│           GraphManager (per-client cache)            │
 │   Reads config.yaml → builds Orchestrator once       │
+│   Holds LLMFactory + VLLMRuntimeManager instances    │
+│   Pre-warms target client graph on startup           │
 └───────────────────────┬──────────────────────────────┘
                         │
                         ▼
@@ -121,7 +123,17 @@ If files are uploaded alongside the query, they are chunked and indexed into the
 │   │   ├── orchestrator.py         # LangGraph graph: router → agents → final
 │   │   ├── graph_manager.py        # Per-client orchestrator cache (async-safe)
 │   │   ├── agent_factory.py        # Instantiates agents from config
-│   │   ├── llm_factory.py          # Creates LLM clients using provider field
+│   │   ├── llm_factory.py          # Creates LLM clients via provider registry
+│   │   ├── llm_providers/          # One class per LLM provider
+│   │   │   ├── base.py             # BaseProvider interface (create())
+│   │   │   ├── registry.py         # Maps provider name → provider instance
+│   │   │   ├── openai_provider.py  # ChatOpenAI wrapper
+│   │   │   ├── groq_provider.py    # ChatGroq wrapper
+│   │   │   ├── google_provider.py  # ChatGoogleGenerativeAI wrapper
+│   │   │   └── self_hosted_provider.py  # vLLM via ChatOpenAI + dynamic base_url
+│   │   ├── llm_factory_utils/      # vLLM runtime support
+│   │   │   ├── port_allocator.py   # Assigns free ports to self-hosted models
+│   │   │   └── runtime_manager.py  # Starts/stops vLLM processes
 │   │   ├── registry.py             # Maps agent names → agent classes
 │   │   └── state_manager.py        # AgentState TypedDict definition
 │   │
@@ -150,7 +162,7 @@ If files are uploaded alongside the query, they are chunked and indexed into the
 │   ├── security/
 │   │   ├── o_auth.py               # JWT creation, validation, role enforcement
 │   │   └── dependencies.py         # FastAPI OAuth2 scheme dependency
-│   ├── services/                   # Business logic layer
+│   │   ├── services/               # Business logic layer
 │   ├── settings/config.py          # Env-var config (DB URL, JWT, LLM, embeddings)
 │   ├── tools/
 │   │   ├── sql_search.py           # Executes SQL queries
@@ -158,11 +170,13 @@ If files are uploaded alongside the query, they are chunked and indexed into the
 │   │   ├── rag_search.py           # Calls vector store retrieve()
 │   │   └── nosql_executors/
 │   │       └── mongo_executor.py   # MongoDB-specific execution
+│   │
 │   ├── utils/
 │   │   ├── document_processor.py   # PDF/TXT chunker (PyMuPDF, heading detection)
 │   │   ├── db_seeder.py            # Seeds initial roles, users, models on startup
 │   │   ├── hash_util.py            # JWT / password hashing
 │   │   └── logger.py               # Structured logging
+│   │
 │   ├── vector_db/
 │   │   ├── base.py                 # BaseVectorStore (embedding loader, path helpers)
 │   │   ├── faiss_store.py          # FAISS: incremental diff + dedup ingestion
@@ -389,12 +403,13 @@ Register a new client organisation with a fully dynamic configuration interface:
 
 1. **Client Details** — Full Name, Email, Phone, Password
 2. **Agent Selection** — Choose which agents to enable and configure for the client
-3. **Per-Agent Configuration:**
+3. **Provider Selection** — Choose the LLM provider (groq, openai, google, self_hosted) per agent; the model list filters automatically to show only models from that provider. An API key input appears for all providers except self_hosted.
+4. **Per-Agent Configuration:**
    - **RAG Agent:** Configure `top_k` (number of results) and vector store backend (FAISS or ChromaDB)
    - **SQL Agent:** Add multiple SQL database connections with type, host, port, credentials, and database name
    - **NoSQL Agent:** Configure MongoDB connections
-4. **Dynamic UI** — Add/remove agents and database connections on-the-fly
-5. **Single Submit** — Register the client and automatically create its config file in one atomic operation
+5. **Dynamic UI** — Add/remove agents and database connections on-the-fly
+6. **Single Submit** — Register the client and automatically create its config file in one atomic operation
 
 #### Configs Tab — Config Management
 Edit existing client configurations without re-registering:
@@ -422,6 +437,8 @@ Enforcement happens at two levels:
 - **Route level** via `auth_dependency.require_roles([...])` FastAPI dependency.
 - **Connection level** — `ConnectionManager` blocks `Admin`/`User` from accessing any other client's databases at query time, regardless of what they pass.
 
+Config reads via GET /configs/read-config-file/{client_id} now return sanitized output for the User role — api_key fields and database passwords are stripped before the response is returned. SuperAdmin and Admin receive the full config.
+
 ---
 
 ## Client Configuration
@@ -436,7 +453,8 @@ allowed_agents:
   sql_agent:
     enabled: true
     model_name: llama-3.3-70b-versatile
-    provider: <provider_name>
+    provider: <provider_name>            # groq | openai | google | self_hosted
+    api_key: <provider-api-key>
     temperature: 0
     database:
       connection1:
@@ -457,7 +475,8 @@ allowed_agents:
   nosql_agent:
     enabled: true
     model_name: llama-3.3-70b-versatile
-    provider: <provider_name>
+    provider: <provider_name>            # groq | openai | google | self_hosted
+    api_key: <provider-api-key>
     temperature: 0
     database:
       connection1:
@@ -471,7 +490,8 @@ allowed_agents:
   rag_agent:
     enabled: true
     model_name: llama-3.3-70b-versatile
-    provider: <provider_name>
+    provider: <provider_name>            # groq | openai | google | self_hosted
+    api_key: <provider-api-key>
     temperature: 0
     top_k: 3
     vector_db: faiss            # faiss | chroma
@@ -511,14 +531,16 @@ EMBEDDING_MODEL=
 
 # Vector store root directory
 VECTOR_DB_PATH=src/vector_stores
+
+# Optional: pre-warm a specific client's graph on startup
+DEPLOYMENT_CLIENT_ID=<client_uuid>
 ```
 
-**LLM provider routing** is now explicit:
-- Each model in the system database has a `provider` field (`groq` or `openai`)
-- The LLM factory uses the provider field directly — no string matching
-- This supports edge-case model names like `openai-oss-120b` (Groq)
+LLM provider routing is now explicit:
 
-The API key is read from the agent's `api_key` field first, then falls back to `LLM_API_KEY`.
+Each model in the system database has a provider field: groq, openai, or self_hosted
+self_hosted models are served via vLLM — the runtime is started automatically and a dynamic base_url is injected; no API key is required
+Per-agent api_key is stored in the config file; for self_hosted no key is needed
 
 ---
 
@@ -577,7 +599,8 @@ In the Assistant view, expand **Upload & Index Knowledge**, upload PDFs or `.txt
 |-------|------------|
 | Backend framework | FastAPI + Uvicorn |
 | Agent orchestration | LangGraph |
-| LLM providers | OpenAI (`gpt-*`), Groq (`llama-*`) |
+| LLM providers | OpenAI (`gpt-*`), Groq (`llama-*`), Google(`gemini-*`) |
+| Self-hosted LLM inference | vLLM (OpenAI-compatible server, dynamic port allocation) |
 | Embeddings | HuggingFace Sentence Transformers |
 | Vector stores | FAISS, ChromaDB |
 | SQL databases | MySQL, PostgreSQL, SQLite, MariaDB, MSSQL (all async) |

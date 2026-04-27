@@ -1,5 +1,6 @@
 import os
 import yaml
+import copy
 import asyncio
 import tempfile
 from cachetools import TTLCache
@@ -43,7 +44,7 @@ class ConfigService:
     # -------------------------
     # READ CONFIG
     # -------------------------
-    def read_config(self, client_id: str):
+    def _read_config_from_disk_or_cache(self, client_id: str):
 
         cached = self._config_cache.get(client_id)
         if cached:
@@ -65,6 +66,32 @@ class ConfigService:
 
         self._config_cache[client_id] = config
         return config
+    
+    
+    def read_config_internal(self, client_id: str):
+        return self._read_config_from_disk_or_cache(client_id)
+    
+    
+    def read_config_public(self, client_id: str, role: str):
+
+        config = self._read_config_from_disk_or_cache(client_id)
+
+        # SuperAdmin, Admin → full access
+        if role in ["SuperAdmin", "Admin"]:
+            return config
+
+        # User → sanitized
+        sanitized = copy.deepcopy(config)
+
+        for agent, conf in sanitized.get("allowed_agents", {}).items():
+            
+            conf.pop("api_key", None)
+
+            dbs = conf.get("database", {})
+            for _, db in dbs.items():
+                db.pop("password", None)
+
+        return sanitized
 
     # -------------------------
     # ATOMIC WRITE HELPER
@@ -111,6 +138,7 @@ class ConfigService:
                     "model_name": agent.model_name,
                     "temperature": agent.temperature,
                     "provider": agent.provider,
+                    "api_key": agent.api_key
                 }
 
                 if agent.database:

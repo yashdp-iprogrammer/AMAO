@@ -111,6 +111,9 @@ class SQLAgent(BaseAgent):
         logger.info(
             f"[SQLAgent] LLM response received | time={time.perf_counter() - start:.2f}s"
         )
+        
+        if raw_output.startswith("```"):
+            raw_output = raw_output.strip("`").replace("json\n", "", 1).strip()
 
         try:
             parsed = json.loads(raw_output)

@@ -25,6 +25,7 @@ class ModelService:
         model = Model(
             model_id=str(uuid4()),
             model_name=model.model_name,
+            provider=model.provider,
             token_size=model.token_size,
             model_subscription=model.model_subscription,
             subscription_cost=model.subscription_cost,

@@ -63,6 +63,18 @@ def validate_client_form(name, email, phone, password, iter):
         errs[f"c_pass_{iter}"] = "Min 8 characters"
     return errs
 
+def validate_api_keys(prefix, agent_rows):
+    errs = {}
+
+    for i, row in enumerate(agent_rows):
+        provider = row.get("provider")
+        api_key = row.get("api_key")
+
+        if provider != "self_hosted":
+            if not api_key or not api_key.strip():
+                errs[f"{prefix}_apikey_{i}"] = "API key required"
+
+    return errs
 
 def validate_temperature(prefix, agent_rows):
     errs = {}
@@ -266,7 +278,25 @@ def api_get_agents():
     return api_request("GET", "/agents/list-agents", fallback={"data": []}).get("data", [])
 
 def api_get_models():
-    return api_request("GET", "/models/list-models", fallback={"data": []}).get("data", [])
+    all_models = []
+    page = 1
+    size = 50
+
+    while True:
+        res = api_request("GET", f"/models/list-models?page={page}&size={size}", fallback={"data": [], "total": 0})
+
+        data = res.get("data", [])
+        total = res.get("total", 0)
+
+        all_models.extend(data)
+
+        # stop condition using total count (BEST way)
+        if len(all_models) >= total:
+            break
+
+        page += 1
+
+    return all_models
 
 def api_get_client_config(client_id):
     return api_request("GET", f"/configs/read-config-file/{client_id}") 
@@ -299,20 +329,11 @@ def login_ui():
 # =====================================================
 def assistant_ui(user):
     st.title("🤖 Intelligent Assistant")
-
-    # with st.expander("📥 Upload & Index Knowledge"):
-    #     files = st.file_uploader("Upload Documents", accept_multiple_files=True)
-    #     if st.button("Build Index") and files:
-    #         with st.spinner("Processing..."):
-    #             api_chat("indexing_request", files)
-    #             st.toast("Indexed!", icon="✅")
     
     with st.expander("📥 Upload & Index Knowledge"):
 
         client_id = st.session_state.user_data.get("client_id")
-        print(f"Client id is: {client_id}")
         config = api_get_client_config(client_id)
-        print(f"config is: {config}")
         rag_enabled = config.get("allowed_agents", {}).get("rag_agent", {}).get("enabled", False)
 
         if not rag_enabled:
@@ -352,61 +373,132 @@ def render_agent_rows(prefix, agent_names, model_names, model_map):
         st.session_state[f"{prefix}_agent_rows"].append({})
         st.rerun()
 
+    # -------------------------
+    # BUILD PROVIDER LIST
+    # -------------------------
+    providers = list(set([m.get("provider") for m in model_map.values() if m.get("provider")]))
+
     for i in range(len(st.session_state[f"{prefix}_agent_rows"])):
         row = st.session_state[f"{prefix}_agent_rows"][i]
         st.markdown("---")
 
-        # r1, r2 = st.columns([10, 1])
-        # r1.markdown("### Agent Configuration")
-        # if r2.button("✖", key=f"{prefix}_del_{i}"):
-        #     st.session_state[f"{prefix}_agent_rows"].pop(i)
-        #     st.session_state[f"{prefix}_db_connections"].pop(i, None)
-        #     st.rerun()
-        
         header_cols = st.columns([8, 1])
 
         with header_cols[0]:
             st.markdown("### Agent Configuration")
 
         with header_cols[1]:
-            st.write("")  # small vertical alignment trick
+            st.write("")
             if st.button("✖", key=f"{prefix}_del_{i}"):
                 st.session_state[f"{prefix}_agent_rows"].pop(i)
                 st.session_state[f"{prefix}_db_connections"].pop(i, None)
                 st.rerun()
 
-        cols = st.columns(3)
+        # -------------------------
+        # ADD PROVIDER COLUMN
+        # -------------------------
+        cols = st.columns(5)
 
+        # -------------------------
+        # AGENT
+        # -------------------------
         agent = cols[0].selectbox(
             "Agent", agent_names,
             index=agent_names.index(row["agent"]) if row.get("agent") in agent_names else 0,
             key=f"{prefix}_agent_{i}",
         )
-        model = cols[1].selectbox(
-            "Model", model_names,
-            index=model_names.index(row["model"]) if row.get("model") in model_names else 0,
+
+        # -------------------------
+        # PROVIDER
+        # -------------------------
+        provider = cols[1].selectbox(
+            "Provider",
+            providers,
+            index=providers.index(row["provider"]) if row.get("provider") in providers else 0,
+            key=f"{prefix}_provider_{i}",
+        )
+        
+        api_key_key = f"{prefix}_apikey_{i}"
+
+        # CLEAR API KEY IF SELF HOSTED
+        if provider == "self_hosted":
+            st.session_state[api_key_key] = None
+
+        # -------------------------
+        # FILTER MODELS BY PROVIDER
+        # -------------------------
+        filtered_models = [
+            m for m in model_names
+            if model_map.get(m, {}).get("provider") == provider
+        ]
+
+        # fallback safety
+        if not filtered_models:
+            filtered_models = model_names
+
+        # -------------------------
+        # MODEL
+        # -------------------------
+        model = cols[2].selectbox(
+            "Model",
+            filtered_models,
+            index=filtered_models.index(row["model"]) if row.get("model") in filtered_models else 0,
             key=f"{prefix}_model_{i}",
         )
         
+        # -------------------------
+        # API KEY (ONLY NON-SELF HOSTED)
+        # -------------------------
+        api_key = None
+        api_key_key = f"{prefix}_apikey_{i}"
+
+        if provider != "self_hosted":
+            api_key = cols[3].text_input(
+                "API Key",
+                value=row.get("api_key", ""),
+                type="password",
+                key=api_key_key
+            )
+
+            with cols[3]:
+                err_caption(api_key_key)
+            
+        else:
+            with cols[3]:
+                st.markdown("<div style='height: 36px;'></div>", unsafe_allow_html=True)
+                st.caption("🔒 Self-hosted (no API key needed)")
+
+        # -------------------------
+        # TEMPERATURE
+        # -------------------------
         temp_key = f"{prefix}_temp_{i}"
-        temp = cols[2].number_input("Temp", value=row.get("temperature", 0.7), key=temp_key)
+        temp = cols[4].number_input(
+            "Temp",
+            value=row.get("temperature", 0.7),
+            key=temp_key
+        )
 
-        with cols[2]:
+        with cols[3]:
             err_caption(temp_key)
-    
-        # temp = cols[2].number_input("Temp", value=row.get("temperature", 0.7), key=f"{prefix}_temp_{i}")
 
+        # -------------------------
+        # STORE DATA
+        # -------------------------
         row_data = {
             "agent":       agent,
             "model":       model,
-            "provider":    model_map.get(model, {}).get("provider"),
+            "provider":    provider,
             "temperature": temp,
+            "api_key":     api_key if provider != "self_hosted" else None,
         }
 
+        # -------------------------
+        # RAG CONFIG
+        # -------------------------
         if agent == "rag_agent":
             st.markdown("##### RAG Configuration")
             rcols = st.columns(2)
-            
+
             topk_key = f"{prefix}_topk_{i}"
             row_data["top_k"] = rcols[0].number_input(
                 "top_k", min_value=1, step=1,
@@ -415,13 +507,16 @@ def render_agent_rows(prefix, agent_names, model_names, model_map):
             )
             with rcols[0]:
                 err_caption(topk_key)
-                
+
             row_data["vector_db"] = rcols[1].selectbox(
                 "vector_db", ["faiss", "chroma"],
                 index=["faiss", "chroma"].index(row.get("vector_db", "faiss")),
                 key=f"{prefix}_vdb_{i}",
             )
 
+        # -------------------------
+        # DB CONFIG
+        # -------------------------
         if agent in ["sql_agent", "nosql_agent"]:
             st.markdown("##### Database Connections")
             if row.get("agent") != agent:
@@ -442,9 +537,12 @@ def collect_agent_config(prefix, model_map):
 
         base = {
             "model_name":  model,
-            "provider":    model_map.get(model, {}).get("provider"),
+            "provider": row.get("provider"),
             "temperature": row.get("temperature", 0.7),
         }
+        
+        if row.get("provider") != "self_hosted":
+            base["api_key"] = row.get("api_key")
 
         if agent == "rag_agent":
             base["top_k"]     = row.get("top_k", 3)
@@ -492,15 +590,11 @@ def superadmin_ui():
         
         
         if st.button("Register", use_container_width=True):
-            # 1. Check if rows actually exist
             no_agents = not st.session_state.cr_agent_rows
             
-            # 2. Field Validations (Name, Email, etc.)
             iter = st.session_state.form_iter
             field_errs = validate_client_form(c_name, c_email, c_phone, c_pass, iter)
             
-            # 3. Targeted DB Validation
-            # Only validate DB connections for rows where the agent is SQL or NoSQL
             relevant_db_errs = {}
             for i, row in enumerate(st.session_state.cr_agent_rows):
                 agent_type = row.get("agent")
@@ -512,7 +606,9 @@ def superadmin_ui():
             temp_errs = validate_temperature("cr", st.session_state.cr_agent_rows)
             topk_errs = validate_top_k("cr", st.session_state.cr_agent_rows)
 
-            all_errs = {**field_errs, **relevant_db_errs, **temp_errs, **topk_errs}
+            api_errs = validate_api_keys("cr", st.session_state.cr_agent_rows)
+
+            all_errs = {**field_errs, **relevant_db_errs, **temp_errs, **topk_errs, **api_errs}
             
             st.session_state.field_errors = all_errs
             st.session_state["cr_no_agent_warning"] = no_agents
@@ -529,6 +625,7 @@ def superadmin_ui():
                     "password":      c_pass,
                     "allowed_agents": collect_agent_config("cr", model_map),
                 }
+                
                 
                 try:
                     res = requests.post(
@@ -590,6 +687,7 @@ def superadmin_ui():
                     "model":       cfg.get("model_name"),
                     "provider":    cfg.get("provider"),
                     "temperature": cfg.get("temperature", 0.7),
+                    "api_key":     cfg.get("api_key")
                 }
                 if "top_k"     in cfg: row["top_k"]     = cfg["top_k"]
                 if "vector_db" in cfg: row["vector_db"] = cfg["vector_db"]
@@ -606,28 +704,53 @@ def superadmin_ui():
             render_agent_rows("cfg", agent_names, model_names, model_map)
 
             if st.button("Update Config", key="cfg_update_btn"):
-                
-                db_errs   = validate_db_connections("cfg", st.session_state.cfg_db_connections)
+
+                relevant_db_errs = {}
+
+                for i, row in enumerate(st.session_state.cfg_agent_rows):
+                    agent_type = row.get("agent")
+
+                    if agent_type in ["sql_agent", "nosql_agent"]:
+                        specific_db_data = {
+                            i: st.session_state.cfg_db_connections.get(i, [{}])
+                        }
+                        relevant_db_errs.update(
+                            validate_db_connections("cfg", specific_db_data)
+                        )
+
                 temp_errs = validate_temperature("cfg", st.session_state.cfg_agent_rows)
                 topk_errs = validate_top_k("cfg", st.session_state.cfg_agent_rows)
+                api_errs  = validate_api_keys("cfg", st.session_state.cfg_agent_rows)
 
-                errs = {**db_errs, **temp_errs, **topk_errs}
+                errs = {**relevant_db_errs, **temp_errs, **topk_errs, **api_errs}
                 
                 st.session_state.field_errors = errs
-                if not errs:
-                    cid = cmap[selected]
-                    res = requests.put(
-                        f"{BASE_URL}/configs/update-config-file/{cid}",
-                        json={"allowed_agents": collect_agent_config("cfg", model_map)},
-                        headers=get_headers(),
-                    )
-                    if res.ok:
-                        st.toast("Config updated successfully!", icon="✅")
-                        st.session_state.field_errors = {}
-                        time.sleep(2)
-                    else:
-                        st.error(f"Update failed: {res.text}")
-                st.rerun()
+                
+                if errs:
+                    st.warning("Please fix validation errors")
+                    return
+
+                cid = cmap[selected]
+
+                res = requests.put(
+                    f"{BASE_URL}/configs/update-config-file/{cid}",
+                    json={"allowed_agents": collect_agent_config("cfg", model_map)},
+                    headers=get_headers(),
+                )
+
+                if res.ok:
+                    st.toast("Config updated successfully!", icon="✅")
+                    st.session_state.field_errors = {}
+                    time.sleep(1)
+                    st.rerun()
+
+                else:
+                    try:
+                        error_msg = res.json().get("detail", res.text)
+                    except:
+                        error_msg = res.text
+
+                    st.error(f"Update failed: {error_msg}")
 
 
 # =====================================================

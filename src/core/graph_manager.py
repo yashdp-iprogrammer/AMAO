@@ -12,18 +12,20 @@ from src.utils.logger import logger
 
 class GraphManager:
 
-    # -------------------------
-    # SHARED CACHE (TTL + LRU)
-    # -------------------------
-    _cache: TTLCache[str, Orchestrator] = TTLCache(maxsize=100, ttl=1800)
+    def __init__(self, llm_factory):
+        self.llm_factory = llm_factory
+        self._factory = AgentFactory(llm_factory)
+        
+        # -------------------------
+        # SHARED CACHE (TTL + LRU)
+        # -------------------------
+        self._cache: TTLCache[str, Orchestrator] = TTLCache(maxsize=100, ttl=1800)
 
-    # -------------------------
-    # PER CLIENT LOCKS (AUTO-CREATED)
-    # -------------------------
-    _client_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # -------------------------
+        # PER CLIENT LOCKS (AUTO-CREATED)
+        # -------------------------
+        self._client_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-    def __init__(self):
-        self._factory = AgentFactory()
 
     # -------------------------
     # GET ORCHESTRATOR
@@ -55,7 +57,7 @@ class GraphManager:
             # -------------------------
             logger.info(f"[GRAPH MANAGER] Creating orchestrator | client_id={client_id}")
 
-            client_config = config_service.read_config(client_id)
+            client_config = config_service.read_config_internal(client_id)
             agent_configs = client_config.get("allowed_agents", {})
 
             if not agent_configs:
@@ -78,7 +80,7 @@ class GraphManager:
             agents = await self._factory.create_agents(enabled_configs)
 
             first_enabled_config = next(iter(enabled_configs.values()))
-            llm = await LLMFactory.create(first_enabled_config)
+            llm = await self.llm_factory.create(first_enabled_config)
 
             orchestrator = Orchestrator(agents, llm)
 

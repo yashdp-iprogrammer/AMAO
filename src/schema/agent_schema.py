@@ -76,6 +76,7 @@ DatabaseConfig = Union[
 class AgentConfig(BaseModel):
     model_name: str
     provider: str
+    api_key: Optional[str] = None
     temperature: float = 0
 
     database: Optional[Dict[str, DatabaseConfig]] = None
@@ -106,6 +107,10 @@ class AgentConfig(BaseModel):
     
     @model_validator(mode="after")
     def validate_agent_config(self):
+
+        if self.provider != "self_hosted" and not self.api_key:
+            raise ValueError("API key required for non self-hosted providers")
+
         if self.database and (self.top_k or self.vector_db):
             raise ValueError("RAG and DB config cannot coexist")
 

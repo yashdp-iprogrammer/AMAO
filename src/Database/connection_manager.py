@@ -73,7 +73,7 @@ class ConnectionManager:
             # LOAD CONFIG
             # -------------------------
             try:
-                config = self.config_service.read_config(client_id)
+                config = self.config_service.read_config_internal(client_id)
             except Exception:
                 logger.exception("[ConnectionManager] Failed to load config")
                 raise

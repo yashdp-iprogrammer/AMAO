@@ -20,11 +20,11 @@ config_session = Annotated[ConfigService, Depends(get_config_service)]
 def read_config(
     client_id: str,
     config_service: config_session,
-    current_user=Depends(auth_dependency.require_roles(["SuperAdmin"]))
+    current_user=Depends(auth_dependency.require_roles(["SuperAdmin", "Admin", "User"]))
 ):
     logger.info(f"[READ_CONFIG] user={current_user}, client_id={client_id}")
 
-    result = config_service.read_config(client_id)
+    result = config_service.read_config_public(client_id, current_user.role_name)
 
     return result
 

@@ -4,7 +4,7 @@ from src.core.graph_manager import GraphManager
 from sqlmodel.ext.asyncio.session import AsyncSession
 from src.services.vector_db_service import VectorDBService
 from src.utils.document_processor import document_processor
-from fastapi import APIRouter, Depends, UploadFile, File, Form
+from fastapi import APIRouter, Depends, Request, UploadFile, File, Form
 from src.services.config_service import ConfigService
 from src.Database import system_db as db
 from typing import Annotated
@@ -13,7 +13,6 @@ from src.security.o_auth import auth_dependency
 from src.utils.logger import logger
 
 
-graph_manager = GraphManager()
 
 router = APIRouter(tags=["Chat"])
 
@@ -33,12 +32,14 @@ def get_connection_manager(
 
 @router.post("/chat")
 async def run_chat(
+    request: Request,
     config_service: config_session,
     connection_manager: ConnectionManager = Depends(get_connection_manager),
     query: str = Form(...),
     files: Optional[List[UploadFile]] = File(None),
     current_user: CurrentUser = Depends(auth_dependency.get_current_active_user),
 ):
+    graph_manager = request.app.state.graph_manager
 
     client_id = current_user.client_id
 
@@ -46,7 +47,7 @@ async def run_chat(
 
     vectordb = None
 
-    config = config_service.read_config(client_id)
+    config = config_service.read_config_internal(client_id)
 
     if files:
         logger.info(f"[ChatRoute] Processing {len(files)} uploaded files")

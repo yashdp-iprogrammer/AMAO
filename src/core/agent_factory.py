@@ -5,8 +5,9 @@ from src.utils.logger import logger
 
 class AgentFactory:
 
-    def __init__(self):
+    def __init__(self, llm_factory):
         self.registry = AgentRegistry()
+        self.llm_factory = llm_factory
 
     async def create_agents(self, agent_configs: dict):
 
@@ -24,7 +25,7 @@ class AgentFactory:
 
             logger.info(f"[AGENT FACTORY] Initializing agent: {agent_name}")
 
-            llm = await LLMFactory.create({
+            llm = await self.llm_factory.create({
                 "model_name": agent_conf["model_name"],
                 "provider": agent_conf["provider"],
                 "temperature": agent_conf.get("temperature", 0),

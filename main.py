@@ -6,7 +6,11 @@ from contextlib import asynccontextmanager
 from src.utils.db_seeder import seed_initial_data
 from src.utils.logger import logger
 from fastapi.responses import JSONResponse
-
+from src.core.llm_factory_utils.port_allocator import PortAllocator
+from src.core.llm_factory_utils.runtime_manager import VLLMRuntimeManager
+from src.core.llm_factory import LLMFactory
+from src.core.graph_manager import GraphManager
+from src.services.config_service import ConfigService
 
 from src.api.routes.auth import router as auth
 from src.api.routes.chat import router as chat
@@ -17,16 +21,38 @@ from src.api.routes.agents import router as agent
 from src.api.routes.models import router as model
 from src.api.routes.logs import router as logs
 from src.api.routes.config import router as config
-
+import os
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+
+    app.state.port_allocator = PortAllocator(8005)
+    runtime_manager = VLLMRuntimeManager(app.state.port_allocator)
+    llm_factory = LLMFactory(runtime_manager)
+    app.state.graph_manager = GraphManager(llm_factory)
+    
     await db.init_db(db.engine)
+    
     async with db.async_session() as session:
         await seed_initial_data(session)
-    logger.info("Application startup complete")
+        
+        # SINGLE-CLIENT PRE-WARMING
+        target_client_id = os.getenv("DEPLOYMENT_CLIENT_ID")
+        
+        if target_client_id:
+            logger.info(f"PRE-WARMING: Booting Graph for Client: {target_client_id}")
+            config_service = ConfigService(session)
+            try:
+                await app.state.graph_manager.get_orchestrator(target_client_id, config_service)
+                logger.info("PRE-WARMING COMPLETE: GPU and Graph are ready.")
+            except Exception as e:
+                logger.error(f"PRE-WARMING FAILED: {str(e)}")
+
+    logger.info("FastAPI Application startup complete")
     yield
     logger.info("Application shutdown")
+    await runtime_manager.stop_all()
+
 
 app = FastAPI(lifespan=lifespan)
 

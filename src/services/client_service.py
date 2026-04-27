@@ -52,7 +52,7 @@ class ClientService:
         try:
             await self.config_service.upsert_config(
                 client_id=created_client.client_id,
-                allowed_agents=client.allowed_agents
+                allowed_agents=client_dict["allowed_agents"]
             )
 
         except Exception:
