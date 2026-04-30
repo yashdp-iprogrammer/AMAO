@@ -12,6 +12,17 @@ class BaseVectorStore(ABC):
     def __init__(self):
         self.base_path = os.path.abspath(config.VECTOR_DB_PATH)
 
+    @classmethod
+    def warmup_embedding(cls):
+        if cls._embedding is None:
+            logger.info(f"PRE-WARM: Loading embedding model: {config.EMBEDDING_MODEL}")
+            cls._embedding = HuggingFaceEmbeddings(
+                model_name=config.EMBEDDING_MODEL
+            )
+            # force actual model load
+            _ = cls._embedding.embed_query("warmup")
+            logger.info("PRE-WARM: Embedding model loaded")
+
     def _get_embedding(self):
 
         if BaseVectorStore._embedding is None:

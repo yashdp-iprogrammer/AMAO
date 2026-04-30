@@ -1,7 +1,6 @@
 from src.agents.base import BaseAgent
 from src.tools.rag_search import retrieve_documents
 import json
-from src.services.vector_db_service import VectorDBService
 from src.prompts.rag_prompt import RAG_PROMPT
 from src.utils.logger import logger
 
@@ -11,8 +10,6 @@ class RAGAgent(BaseAgent):
     def __init__(self, name, config, llm):
         super().__init__(name, config)
         self.llm = llm
-        db_type = config.get("vector_db", "faiss")
-        self.vectordb = VectorDBService(db_type)
 
     async def _extract_sub_intents(self, query: str):
         """
@@ -43,6 +40,10 @@ class RAGAgent(BaseAgent):
 
         query = state["user_query"]
         client_id = state["client_id"]
+        vectordb = state.get("vectordb")
+
+        if not vectordb:
+            raise ValueError("RAGAgent invoked but vectordb is not initialized")
 
         sub_queries = await self._extract_sub_intents(query)
 
@@ -53,7 +54,7 @@ class RAGAgent(BaseAgent):
         for sub_query in sub_queries:
 
             docs = await retrieve_documents(
-                vectordb=self.vectordb,
+                vectordb=vectordb,
                 client_id=client_id,
                 query=sub_query,
                 agent_config=self.config

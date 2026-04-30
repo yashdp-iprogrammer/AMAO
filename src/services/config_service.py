@@ -151,7 +151,19 @@ class ConfigService:
                     agent_dict["top_k"] = agent.top_k
 
                 if agent.vector_db is not None:
-                    agent_dict["vector_db"] = agent.vector_db
+                    vdb = agent.vector_db
+
+                    if isinstance(vdb, dict):
+                        vdb_dict = vdb
+                    elif hasattr(vdb, "model_dump"):
+                        vdb_dict = vdb.model_dump(exclude_none=True)
+                    else:
+                        vdb_dict = {"provider": vdb}
+
+                    if not vdb_dict.get("config"):
+                        vdb_dict.pop("config", None)
+
+                    agent_dict["vector_db"] = vdb_dict
 
                 agents_data[agent_name] = agent_dict
 

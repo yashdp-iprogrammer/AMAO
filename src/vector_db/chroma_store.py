@@ -4,7 +4,9 @@ import asyncio
 from cachetools import TTLCache
 from collections import defaultdict
 
+import chromadb
 from langchain_chroma import Chroma
+
 from src.vector_db.base import BaseVectorStore
 from transformers import logging as hf_logging
 from src.utils.logger import logger
@@ -20,183 +22,308 @@ class ChromaVectorStore(BaseVectorStore):
     _cache = TTLCache(maxsize=50, ttl=1800)
 
     # -------------------------
-    # PER CLIENT LOCKS
+    # LOCKS
     # -------------------------
-    _client_locks = defaultdict(asyncio.Lock)
+    _store_locks = defaultdict(asyncio.Lock)
+    _write_locks = defaultdict(asyncio.Lock)
 
-    def __init__(self):
+    def __init__(self, config: dict = None):
         super().__init__()
         self.embedding = self._get_embedding()
+        self.config = config or {}
 
-    def _get_vector_path(self, client_id):
+
+    def _get_mode(self):
+        return self.config.get("mode")
+
+
+    def _get_paths(self, client_id):
         client_root = self._get_client_root(client_id)
-        
-        chroma_path = os.path.join(client_root, "chroma")
-        docs_path = os.path.join(chroma_path, "hashes")
-        
-        os.makedirs(docs_path, exist_ok=True)
-        os.makedirs(chroma_path, exist_ok=True)
+        mode = self._get_mode()
 
-        return chroma_path, docs_path
+        if mode == "local":
+            base_path = os.path.join(client_root, "chroma_local")
+            chroma_path = os.path.join(base_path, "db")
+            hashes_path = os.path.join(base_path, "hashes")
+
+        elif mode == "cloud":
+            base_path = os.path.join(client_root, "chroma_cloud")
+            chroma_path = None
+            hashes_path = os.path.join(base_path, "hashes")
+
+        else:
+            raise ValueError(f"Unsupported mode: {mode}")
+
+        os.makedirs(hashes_path, exist_ok=True)
+
+        global_hash_path = os.path.join(base_path, "global_hashes.json")
+
+        if chroma_path:
+            os.makedirs(chroma_path, exist_ok=True)
+
+        return chroma_path, hashes_path, global_hash_path
+
+
+    def _get_cache_key(self, client_id):
+        mode = self._get_mode()
+
+        if mode == "local":
+            return f"{client_id}:local"
+
+        return f"{client_id}:cloud:{self.config.get('tenant_id')}:{self.config.get('database')}:{self.config.get('collection_name')}"
 
     # -------------------------
-    # SAFE LOAD STORE
+    # CREATE STORE
     # -------------------------
-    async def _load_store(self, client_id, chroma_path):
+    def _create_store(self, client_id, chroma_path):
 
-        # FAST PATH
-        cached = self._cache.get(client_id)
-        if cached:
-            logger.info(f"[CHROMA] Cache hit | client_id={client_id}")
-            return cached
+        mode = self._get_mode()
 
-        client_lock = self._client_locks[client_id]
+        if mode == "local":
+            return Chroma(
+                persist_directory=chroma_path,
+                embedding_function=self.embedding
+            )
 
-        async with client_lock:
+        elif mode == "cloud":
 
-            # DOUBLE CHECK
-            cached = self._cache.get(client_id)
-            if cached:
-                return cached
+            api_key = self.config.get("vectordb_api_key")
+            tenant = self.config.get("tenant_id")
+            database = self.config.get("database")
+            collection_name = self.config.get("collection_name")
 
-            logger.info(f"[CHROMA] Loading store from disk | client_id={client_id}")
+            if not api_key or not tenant or not database or not collection_name:
+                raise ValueError(
+                    "Cloud mode requires: api_key, tenant, database, collection_name"
+                )
 
             try:
-                vector_store = Chroma(
-                    persist_directory=chroma_path,
-                    embedding_function=self.embedding
+                client = chromadb.CloudClient(
+                    tenant=tenant,
+                    database=database,
+                    api_key=api_key
                 )
             except Exception:
-                logger.exception(f"[CHROMA] Failed to initialize store | client_id={client_id}")
-                return None
+                logger.exception("[CHROMA CLOUD] Failed to initialize client")
+                raise
 
-            self._cache[client_id] = vector_store
-            return vector_store
+            # -------------------------
+            # CHECK / CREATE COLLECTION
+            # -------------------------
+            try:
+                client.get_collection(name=collection_name)
+                logger.info(f"[CHROMA CLOUD] Collection exists: {collection_name}")
+            except Exception:
+                try:
+                    client.create_collection(name=collection_name)
+                    logger.info(f"[CHROMA CLOUD] Created collection: {collection_name}")
+                except Exception:
+                    logger.exception("[CHROMA CLOUD] Failed to create collection")
+                    raise
+
+            return Chroma(
+                client=client,
+                collection_name=collection_name,
+                embedding_function=self.embedding
+            )
+
+        else:
+            raise ValueError(f"Unsupported mode: {mode}")
 
     # -------------------------
-    # SAFE INVALIDATION
+    # LOAD STORE
+    # -------------------------
+    async def _load_store(self, client_id):
+
+        chroma_path, _, _ = self._get_paths(client_id)
+        cache_key = self._get_cache_key(client_id)
+
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        async with self._store_locks[cache_key]:
+
+            if cache_key in self._cache:
+                return self._cache[cache_key]
+
+            try:
+                store = self._create_store(client_id, chroma_path)
+            except Exception:
+                logger.exception("[CHROMA] Store init failed")
+                return None
+
+            self._cache[cache_key] = store
+            return store
+
+    # -------------------------
+    # GLOBAL HASH
+    # -------------------------
+    async def _load_global_hash(self, global_hash_path):
+
+        async with self._write_locks["global_hash"]:
+
+            if not os.path.exists(global_hash_path):
+                return set()
+
+            def _read():
+                with open(global_hash_path, "r") as f:
+                    return set(json.load(f))
+
+            return await asyncio.to_thread(_read)
+
+    async def _save_global_hash(self, global_hash_path, hash_set):
+
+        async with self._write_locks["global_hash"]:
+
+            def _write():
+                with open(global_hash_path, "w") as f:
+                    json.dump(list(hash_set), f)
+
+            await asyncio.to_thread(_write)
+
+    # -------------------------
+    # INVALIDATE CACHE
     # -------------------------
     async def _invalidate_cache(self, client_id):
 
-        client_lock = self._client_locks[client_id]
+        prefix = f"{client_id}"
 
-        async with client_lock:
-
-            if client_id in self._cache:
-                logger.info(f"[CHROMA] Cache invalidated | client_id={client_id}")
-                self._cache.pop(client_id, None)
-
+        for key in list(self._cache.keys()):
+            if key.startswith(prefix):
+                self._cache.pop(key, None)
 
     # -------------------------
     # APPEND
     # -------------------------
-    async def append_to_store(self, client_id: str, document_name: str, paragraphs: list):
+    async def append_to_store(self, client_id, document_name, paragraphs):
 
-        logger.info(f"[CHROMA] Append start | client_id={client_id}, document={document_name}")
-
-        chroma_path, docs_path = self._get_vector_path(client_id)
-        hash_path = os.path.join(docs_path, f"{document_name}.hashes")
+        chroma_path, hashes_path, global_hash_path = self._get_paths(client_id)
+        hash_file = os.path.join(hashes_path, f"{document_name}.hashes")
 
         if paragraphs is None:
-            logger.info("[CHROMA] Skipping update (already processed)")
             return "File already processed"
 
-        new_hash_map = {p["hash"]: p["text"] for p in paragraphs}
-        new_hashes = set(new_hash_map.keys())
+        # -------------------------
+        # BUILD SAFE MAP
+        # -------------------------
+        new_map = {}
+        for p in paragraphs:
+            h = p.get("hash")
+            t = p.get("text")
 
-        vector_store = await self._load_store(client_id, chroma_path)
+            if not h or t is None:
+                continue
 
-        if not vector_store:
-            logger.error("[CHROMA] Store not available")
-            return "Vector store not available"
+            new_map[str(h)] = str(t)
 
-        before_count = vector_store._collection.count()
+        new_hashes = set(new_map.keys())
 
-        # -----------------------------
+        logger.info("[DEBUG] Before load store")
+        store = await self._load_store(client_id)
+        logger.info("[DEBUG] After load store")
+
+        if not store:
+            return "Store unavailable"
+
+        global_hashes = await self._load_global_hash(global_hash_path)
+        logger.info("[DEBUG] Loaded global hash")
+
+        # -------------------------
         # EXISTING FILE
-        # -----------------------------
-        if os.path.exists(hash_path):
+        # -------------------------
+        if os.path.exists(hash_file):
 
-            logger.info("[CHROMA] Existing document detected, running incremental diff")
+            try:
+                with open(hash_file, "r") as f:
+                    old_map = json.load(f)
+            except Exception:
+                old_map = {}
 
-            with open(hash_path, "r") as f:
-                old_hash_map = json.load(f)
-
-            old_hashes = set(old_hash_map.keys())
+            old_hashes = set(old_map.keys())
 
             added = new_hashes - old_hashes
             deleted = old_hashes - new_hashes
 
-            if not added and not deleted:
-                logger.info("[CHROMA] No document changes detected")
-                return "No changes detected"
-
-            logger.info(f"[CHROMA] Diff summary | added={len(added)}, deleted={len(deleted)}")
-
+            # SAFE DELETE
             if deleted:
-                logger.info(f"[CHROMA] Deleting {len(deleted)} embeddings")
-                vector_store.delete(ids=list(deleted))
+                try:
+                    await asyncio.to_thread(store.delete, list(deleted))
+                except Exception:
+                    logger.exception("[CHROMA] Delete failed")
 
-        # -----------------------------
+            global_hashes -= deleted
+
+        # -------------------------
         # NEW FILE
-        # -----------------------------
+        # -------------------------
         else:
+            added = new_hashes - global_hashes
 
-            logger.info("[CHROMA] New document detected")
-
-            existing = vector_store._collection.get(include=[])
-            existing_hashes = set(existing.get("ids", []))
-
-            added = new_hashes - existing_hashes
-
-        # -----------------------------
+        # -------------------------
         # ADD
-        # -----------------------------
+        # -------------------------
         if added:
+            texts = []
+            ids = []
+            metas = []
 
-            texts = [new_hash_map[h] for h in added]
-            ids = list(added)
-            metadatas = [{"doc": document_name, "para_hash": h} for h in added]
+            for h in sorted(added):
+                text = new_map.get(h)
+                if text is None:
+                    continue
 
-            logger.info(f"[CHROMA] Adding {len(texts)} embeddings")
+                texts.append(text)
+                ids.append(h)
+                metas.append({"doc": document_name, "para_hash": h})
 
-            vector_store.add_texts(
-                texts=texts,
-                ids=ids,
-                metadatas=metadatas
-            )
+            if texts:
+                try:
+                    logger.info(f"[DEBUG] Upserting {len(texts)} chunks")
+                    await asyncio.to_thread(
+                        store.add_texts,
+                        texts,
+                        ids=ids,
+                        metadatas=metas
+                    )
+                    global_hashes.update(added)
+                except Exception:
+                    logger.exception("[CHROMA] Add failed")
 
-        after_count = vector_store._collection.count()
 
-        logger.info(f"[CHROMA] Count before={before_count}, after={after_count}")
+        # -------------------------
+        # SAVE FILE HASH
+        # -------------------------
+        def _write_file():
+            with open(hash_file, "w") as f:
+                json.dump(new_map, f)
 
-        # -----------------------------
-        # SAVE HASH
-        # -----------------------------
-        with open(hash_path, "w") as f:
-            json.dump(new_hash_map, f)
+        await asyncio.to_thread(_write_file)
+
+        # -------------------------
+        # SAVE GLOBAL HASH
+        # -------------------------
+        await self._save_global_hash(global_hash_path, global_hashes)
 
         await self._invalidate_cache(client_id)
 
-        return "Incremental update complete"
+        return "Update complete"
 
     # -------------------------
     # RETRIEVE
     # -------------------------
     async def retrieve(self, client_id, query, top_k):
-        
-        logger.info(f"[CHROMA] Retrieve | client_id={client_id}, top_k={top_k}, question={query}")
 
-        chroma_path, _ = self._get_vector_path(client_id)
+        store = await self._load_store(client_id)
 
-        vector_store = await self._load_store(client_id, chroma_path)
-
-        if not vector_store:
+        if not store:
             return []
 
         try:
-            docs = vector_store.similarity_search(query, k=top_k)
-            return docs
+            return await asyncio.to_thread(
+                store.similarity_search,
+                query,
+                top_k
+            )
         except Exception:
             logger.exception("[CHROMA] Retrieval failed")
             return []

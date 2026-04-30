@@ -93,7 +93,6 @@ class SQLAgent(BaseAgent):
 
         schema_text = self._format_schema(schemas)
         
-        print("SQL schemas:\n", schema_text)
 
         prompt = SQL_PROMPT.format(
             schema=schema_text,

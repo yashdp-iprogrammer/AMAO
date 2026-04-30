@@ -11,6 +11,7 @@ from src.core.llm_factory_utils.runtime_manager import VLLMRuntimeManager
 from src.core.llm_factory import LLMFactory
 from src.core.graph_manager import GraphManager
 from src.services.config_service import ConfigService
+from src.vector_db.base import BaseVectorStore
 
 from src.api.routes.auth import router as auth
 from src.api.routes.chat import router as chat
@@ -43,10 +44,11 @@ async def lifespan(app: FastAPI):
             logger.info(f"PRE-WARMING: Booting Graph for Client: {target_client_id}")
             config_service = ConfigService(session)
             try:
+                BaseVectorStore.warmup_embedding()
                 await app.state.graph_manager.get_orchestrator(target_client_id, config_service)
                 logger.info("PRE-WARMING COMPLETE: GPU and Graph are ready.")
             except Exception as e:
-                logger.error(f"PRE-WARMING FAILED: {str(e)}")
+                logger.exception("PRE-WARMING FAILED")
 
     logger.info("FastAPI Application startup complete")
     yield

@@ -1,37 +1,26 @@
-from src.vector_db.faiss_store import FaissVectorStore
-from src.vector_db.chroma_store import ChromaVectorStore
+from src.vector_db.vectordb_registry import get_vector_store
 from src.utils.logger import logger
 
 
 class VectorDBService:
 
-    def __init__(self, db_type: str):
-        logger.info(f"[VectorDBService] Initializing VectorDBService with db_type: {db_type}")
+    def __init__(self, store):
+        self.store = store
 
-        if db_type == "faiss":
-            self.store = FaissVectorStore()
+    @classmethod
+    async def create(cls, client_id: str, db_type: str, db_config: dict = None):
+        logger.info(f"[VectorDBService] Initializing with db_type: {db_type}")
 
-        elif db_type == "chroma":
-            self.store = ChromaVectorStore()
+        store = await get_vector_store(client_id, db_type, db_config)
 
-        else:
-            logger.warning(f"[VectorDBService] Unsupported vector DB type: {db_type}")
-            raise ValueError(f"Unsupported vector DB: {db_type}")
+        return cls(store)
 
-    def append_to_store(self, client_id, document_name, texts):
+    async def append_to_store(self, client_id, document_name, texts):
         logger.info(f"[VectorDBService] Appending to vector store | client_id={client_id}, document={document_name}")
 
-        return self.store.append_to_store(
-            client_id,
-            document_name,
-            texts,
-        )
+        return await self.store.append_to_store(client_id, document_name, texts)
 
-    def retrieve(self, client_id, query, top_k):
+    async def retrieve(self, client_id, query, top_k):
         logger.info(f"[VectorDBService] Retrieving from vector store | client_id={client_id}, top_k={top_k}")
 
-        return self.store.retrieve(
-            client_id,
-            query,
-            top_k
-        )
+        return await self.store.retrieve(client_id, query, top_k)

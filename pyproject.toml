@@ -23,6 +23,7 @@ dependencies = [
     "motor>=3.7.1",
     "passlib[argon2]>=1.7.4",
     "pdf2image>=1.17.0",
+    "pinecone>=8.1.2",
     "pydantic[email]>=2.12.5",
     "pymupdf>=1.27.1",
     "pytesseract>=0.3.13",

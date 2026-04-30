@@ -1,5 +1,5 @@
-from typing import Optional, Dict, Union, Literal
-from pydantic import BaseModel, field_validator, model_validator
+from typing import Optional, Dict, Union, Literal, Any
+from pydantic import BaseModel, field_validator, model_validator, Field
 
 
 class BaseDBConfig(BaseModel):
@@ -73,6 +73,11 @@ DatabaseConfig = Union[
 ]
 
 
+class VectorDBConfig(BaseModel):
+    provider: str
+    config: Dict[str, Any] = Field(default_factory=dict)
+    
+
 class AgentConfig(BaseModel):
     model_name: str
     provider: str
@@ -82,7 +87,7 @@ class AgentConfig(BaseModel):
     database: Optional[Dict[str, DatabaseConfig]] = None
 
     top_k: Optional[int] = None
-    vector_db: Optional[str] = None
+    vector_db: Optional[VectorDBConfig] = None
 
     @field_validator("temperature")
     @classmethod
@@ -101,8 +106,8 @@ class AgentConfig(BaseModel):
     @field_validator("vector_db")
     @classmethod
     def validate_vector_db(cls, v):
-        if v is not None and v not in ["faiss", "chroma"]:
-            raise ValueError("vector_db must be either 'faiss' or 'chroma'")
+        if v is not None and v.provider not in ["faiss", "chroma", "pinecone"]:
+            raise ValueError("Unsupported vector_db provider")
         return v
     
     @model_validator(mode="after")
@@ -111,7 +116,7 @@ class AgentConfig(BaseModel):
         if self.provider != "self_hosted" and not self.api_key:
             raise ValueError("API key required for non self-hosted providers")
 
-        if self.database and (self.top_k or self.vector_db):
+        if self.database and self.vector_db:
             raise ValueError("RAG and DB config cannot coexist")
 
         return self

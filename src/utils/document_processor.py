@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import asyncio
 import hashlib
 import pymupdf
 import pytesseract
@@ -213,20 +214,53 @@ class DocumentProcessor:
                 reference_streak = 0
                 REFERENCE_THRESHOLD = 3
 
+                # -------------------------
+                # PASS 1: DETECT OCR PAGES
+                # -------------------------
+                ocr_pages = []
+                page_text_map = {}
+
                 for page_index, page in enumerate(doc, start=1):
+                    raw_text = page.get_text()
+                    page_text_map[page_index] = raw_text
+
+                    if self._is_low_text(raw_text, page_index):
+                        ocr_pages.append(page_index)
+
+                # -------------------------
+                # PASS 2: PARALLEL OCR
+                # -------------------------
+                ocr_map = {}
+
+                if ocr_pages:
+                    ocr_used = True
+                    logger.info(f"Running parallel OCR for {len(ocr_pages)} pages")
+
+                    semaphore = asyncio.Semaphore(4)  # limit concurrency
+
+                    async def run_ocr(page_num):
+                        async with semaphore:
+                            return await asyncio.to_thread(self._ocr_page, tmp_path, page_num)
+
+                    tasks = [run_ocr(p) for p in ocr_pages]
+                    results_ocr = await asyncio.gather(*tasks)
+
+                    ocr_map = dict(zip(ocr_pages, results_ocr))
+
+                # -------------------------
+                # PASS 3: NORMAL PROCESSING
+                # -------------------------
+                for page_index, page in enumerate(doc, start=1):
+
                     logger.info(f"Processing page {page_index} of {document_name}")
 
-                    raw_text = page.get_text()
-
-                    # 🔥 OCR FALLBACK
-                    if self._is_low_text(raw_text, page_index):
-                        ocr_used = True
+                    # Use OCR result if exists
+                    if page_index in ocr_map:
                         logger.info(f"OCR applied on page {page_index} for {document_name}")
-
-                        ocr_text = self._ocr_page(tmp_path, page_index)
+                        raw_text = ocr_map[page_index]
 
                         paragraphs = [
-                            p.strip() for p in ocr_text.split("\n\n") if p.strip()
+                            p.strip() for p in raw_text.split("\n\n") if p.strip()
                         ]
 
                         for para in paragraphs:

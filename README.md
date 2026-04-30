@@ -172,19 +172,23 @@ If files are uploaded alongside the query, they are chunked and indexed into the
 │   │       └── mongo_executor.py   # MongoDB-specific execution
 │   │
 │   ├── utils/
-│   │   ├── document_processor.py   # PDF/TXT chunker (PyMuPDF, heading detection)
+│   │   ├── document_processor.py   # PDF/TXT chunker with parallel OCR fallback
 │   │   ├── db_seeder.py            # Seeds initial roles, users, models on startup
 │   │   ├── hash_util.py            # JWT / password hashing
 │   │   └── logger.py               # Structured logging
 │   │
 │   ├── vector_db/
-│   │   ├── base.py                 # BaseVectorStore (embedding loader, path helpers)
+│   │   ├── base.py                 # BaseVectorStore (embedding loader, warmup, path helpers)
 │   │   ├── faiss_store.py          # FAISS: incremental diff + dedup ingestion
-│   │   └── chroma_store.py         # ChromaDB: incremental diff + dedup ingestion
+│   │   ├── chroma_store.py         # ChromaDB local + cloud: mode-aware paths, global hash tracking
+│   │   ├── pinecone_store.py       # Pinecone: namespace-scoped upsert + retrieval, incremental diff
+│   │   └── vectordb_registry.py    # Resolves provider name → store instance
 │   └── vector_stores/              # Persisted vector data (one folder per client UUID)
 │       └── client_id_<uuid>/
 │           ├── faiss/              # index.faiss, index.pkl, hashes/
-│           └── chroma/             # chroma.sqlite3, hashes/
+│           ├── chroma_local/       # db/ (SQLite), global_hashes.json, hashes/
+│           └── chroma_cloud/       # global_hashes.json, hashes/ (vectors stored remotely)
+│           └── pinecone/           # global_hashes.json, hashes/ (vectors stored remotely)
 │
 ├── logs/app.log
 └── test/                           # Sample PDFs and test scripts
@@ -301,6 +305,8 @@ If no `.hashes` file exists for the incoming filename, the store checks the new 
 This prevents duplicate embeddings even when the same document (or overlapping content) is uploaded under a different name.
 
 Both FAISS and ChromaDB implement identical diffing logic. After every successful ingestion the `.hashes` file is written (or overwritten) with the current `{ hash: text }` map for that document.
+
+Pinecone implements the same two-case diffing strategy. Vectors are upserted into a per-client namespace so that multiple clients can share a single index without data leakage. Metadata (text, document) is stored alongside each vector so retrieval returns raw text without a separate lookup. The local global_hashes.json file plays the same dedup role as in the Chroma implementation — preventing re-embedding of chunks that already exist in the remote index under a different filename.
 
 ### Storage Layout
 ```
@@ -494,7 +500,33 @@ allowed_agents:
     api_key: <provider-api-key>
     temperature: 0
     top_k: 3
-    vector_db: faiss            # faiss | chroma
+
+    # FAISS (local, no extra config needed)
+    vector_db:
+      provider: faiss
+
+    # Chroma local (no extra config needed)
+    # vector_db:
+    #   provider: chroma
+    #   config:
+    #     mode: local
+
+    # Chroma cloud
+    # vector_db:
+    #   provider: chroma
+    #   config:
+    #     mode: cloud
+    #     vectordb_api_key: <chroma-cloud-api-key>
+    #     tenant_id: <tenant-id>
+    #     database: <database-name>
+    #     collection_name: <collection-name>
+
+    # Pinecone
+    # vector_db:
+    #   provider: pinecone
+    #   config:
+    #     vectordb_api_key: <pinecone-api-key>
+    #     index_name: <index-name>
 ```
 
 **Key points:**

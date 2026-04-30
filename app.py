@@ -2,15 +2,17 @@ import re
 import streamlit as st
 import requests
 import time
+import copy
+import json
 
 st.set_page_config(page_title="AMAO", layout="wide")
 
 BASE_URL = "http://localhost:8000"
 
 
-# =====================================================
+# ====================
 # SESSION STATE INIT
-# =====================================================
+# ====================
 def init_state():
     DEFAULT_STATE = {
         "form_iter": 0,
@@ -119,6 +121,42 @@ def validate_db_connections(prefix, db_connections):
                     errs[f"{prefix}_p_{i}_{j}"] = "Must be a number"
     return errs
 
+def validate_vector_db(prefix, agent_rows):
+    errs = {}
+
+    for i, row in enumerate(agent_rows):
+        vdb = row.get("vector_db")
+
+        if not isinstance(vdb, dict):
+            continue
+
+        provider = vdb.get("provider")
+        cfg = vdb.get("config", {}) or {}
+
+        # -------------------------
+        # PINECONE VALIDATION
+        # -------------------------
+        if provider == "pinecone":
+            if not cfg.get("vectordb_api_key"):
+                errs[f"{prefix}_pine_key_{i}"] = "Required"
+            if not cfg.get("index_name"):
+                errs[f"{prefix}_pine_index_{i}"] = "Required"
+
+        # -------------------------
+        # CHROMA CLOUD VALIDATION
+        # -------------------------
+        if provider == "chroma cloud":
+            if not cfg.get("vectordb_api_key"):
+                errs[f"{prefix}_chroma_key_{i}"] = "Required"
+            if not cfg.get("tenant_id"):
+                errs[f"{prefix}_chroma_tenant_{i}"] = "Required"
+            if not cfg.get("database"):
+                errs[f"{prefix}_chroma_db_{i}"] = "Required"
+            if not cfg.get("collection_name"):
+                errs[f"{prefix}_chroma_collection_{i}"] = "Required"
+
+    return errs
+
 
 # =====================================================
 # DB CONNECTION RENDERER
@@ -134,7 +172,6 @@ def render_db_connections(prefix, i, db_list, agent_type):
     for j in range(len(db_list)):
         db = db_list[j]
 
-        # 7 columns (last one for delete button)
         dcols = st.columns([0.8, 1.2, 0.8, 1.2, 1.2, 1.8, 0.4])
 
         db_type_key = f"{prefix}_db_{i}_{j}"
@@ -210,7 +247,7 @@ def render_db_connections(prefix, i, db_list, agent_type):
             }
 
         # -------------------------
-        # DELETE BUTTON (for all cases)
+        # DELETE BUTTON
         # -------------------------
         if len(db_list) > 1:
             with btn_col:
@@ -290,7 +327,6 @@ def api_get_models():
 
         all_models.extend(data)
 
-        # stop condition using total count (BEST way)
         if len(all_models) >= total:
             break
 
@@ -478,7 +514,7 @@ def render_agent_rows(prefix, agent_names, model_names, model_map):
             key=temp_key
         )
 
-        with cols[3]:
+        with cols[4]:
             err_caption(temp_key)
 
         # -------------------------
@@ -492,12 +528,14 @@ def render_agent_rows(prefix, agent_names, model_names, model_map):
             "api_key":     api_key if provider != "self_hosted" else None,
         }
 
+
         # -------------------------
         # RAG CONFIG
         # -------------------------
         if agent == "rag_agent":
             st.markdown("##### RAG Configuration")
-            rcols = st.columns(2)
+
+            rcols = st.columns([1, 1, 1, 1, 1, 1], gap="small")
 
             topk_key = f"{prefix}_topk_{i}"
             row_data["top_k"] = rcols[0].number_input(
@@ -508,11 +546,124 @@ def render_agent_rows(prefix, agent_names, model_names, model_map):
             with rcols[0]:
                 err_caption(topk_key)
 
-            row_data["vector_db"] = rcols[1].selectbox(
-                "vector_db", ["faiss", "chroma"],
-                index=["faiss", "chroma"].index(row.get("vector_db", "faiss")),
+            vdb_options = ["faiss", "chroma local", "chroma cloud", "pinecone"]
+
+            current_vdb = row.get("vector_db")
+            if isinstance(current_vdb, dict):
+                current_vdb = current_vdb.get("provider")
+
+            index = vdb_options.index(current_vdb) if current_vdb in vdb_options else 0
+
+            vector_db = rcols[1].selectbox(
+                "vector_db",
+                vdb_options,
+                index=index,
                 key=f"{prefix}_vdb_{i}",
             )
+
+            vectordb_payload = {"provider": vector_db}
+
+            # -------------------------
+            # CHROMA LOCAL
+            # -------------------------
+            if vector_db == "chroma local":
+                vectordb_payload["config"] = {"mode": "local"}
+
+                for col in rcols[2:]:
+                    with col:
+                        st.empty()
+
+            # -------------------------
+            # CHROMA CLOUD
+            # -------------------------
+            elif vector_db == "chroma cloud":
+
+                chroma_cfg = row.get("vector_db", {}).get("config", {})
+
+                chroma_api_key = rcols[2].text_input(
+                    "Chroma API Key",
+                    type="password",
+                    value=chroma_cfg.get("vectordb_api_key", ""),
+                    key=f"{prefix}_chroma_key_{i}"
+                )
+                
+                with rcols[2]: err_caption(f"{prefix}_chroma_key_{i}") 
+
+                tenant_id = rcols[3].text_input(
+                    "Tenant ID",
+                    value=chroma_cfg.get("tenant", ""),
+                    key=f"{prefix}_chroma_tenant_{i}"
+                )
+                
+                with rcols[3]: err_caption(f"{prefix}_chroma_tenant_{i}")
+
+                database_name = rcols[4].text_input(
+                    "Database",
+                    value=chroma_cfg.get("database", ""),
+                    key=f"{prefix}_chroma_db_{i}"
+                )
+                
+                with rcols[4]: err_caption(f"{prefix}_chroma_db_{i}")
+
+                collection_name = rcols[5].text_input(
+                    "Collection",
+                    value=chroma_cfg.get("collection_name", ""),
+                    key=f"{prefix}_chroma_collection_{i}"
+                )
+                
+                with rcols[5]: err_caption(f"{prefix}_chroma_collection_{i}")
+
+                vectordb_payload["config"] = {
+                    "mode": "cloud",
+                    "vectordb_api_key": chroma_api_key,
+                    "tenant_id": tenant_id,
+                    "database": database_name,
+                    "collection_name": collection_name
+                }
+
+            # -------------------------
+            # PINECONE
+            # -------------------------
+            elif vector_db == "pinecone":
+
+                pine_config = row.get("vector_db", {}).get("config", {})
+
+                pine_key = rcols[2].text_input(
+                    "Pinecone API Key",
+                    type="password",
+                    value=pine_config.get("vectordb_api_key", ""),
+                    key=f"{prefix}_pine_key_{i}"
+                )
+                
+                with rcols[2]: err_caption(f"{prefix}_pine_key_{i}")
+
+                index_name = rcols[3].text_input(
+                    "Index Name",
+                    value=pine_config.get("index_name", ""),
+                    key=f"{prefix}_pine_index_{i}"
+                )
+                
+                with rcols[3]: err_caption(f"{prefix}_pine_index_{i}")
+
+                for col in rcols[4:]:
+                    with col:
+                        st.empty()
+
+                vectordb_payload["config"] = {
+                    "vectordb_api_key": pine_key,
+                    "index_name": index_name
+                }
+
+            # -------------------------
+            # FAISS
+            # -------------------------
+            else:
+                for col in rcols[2:]:
+                    with col:
+                        st.empty()
+
+            row_data["vector_db"] = vectordb_payload
+        
 
         # -------------------------
         # DB CONFIG
@@ -545,9 +696,40 @@ def collect_agent_config(prefix, model_map):
             base["api_key"] = row.get("api_key")
 
         if agent == "rag_agent":
-            base["top_k"]     = row.get("top_k", 3)
-            base["vector_db"] = row.get("vector_db", "faiss")
+            base["top_k"] = row.get("top_k", 3)
 
+            vdb = row.get("vector_db")
+
+            if not isinstance(vdb, dict):
+                base["vector_db"] = {
+                    "provider": vdb,
+                    "config": {}
+                }
+            else:
+                provider = vdb.get("provider")
+                vdb_cfg = copy.deepcopy(vdb.get("config", {}))
+
+                if provider == "chroma local":
+                    base["vector_db"] = {
+                        "provider": "chroma",
+                        "config": {
+                            "mode": "local"
+                        }
+                    }
+
+                elif provider == "chroma cloud":
+                    base["vector_db"] = {
+                        "provider": "chroma",
+                        "config": {
+                            "mode": "cloud",
+                            **vdb_cfg
+                        }
+                    }
+
+                else:
+                    base["vector_db"] = copy.deepcopy(vdb)
+            
+        
         if agent in ["sql_agent", "nosql_agent"]:
             dbs = st.session_state[f"{prefix}_db_connections"].get(i, [])
             base["database"] = build_db_payload(dbs)
@@ -607,8 +789,9 @@ def superadmin_ui():
             topk_errs = validate_top_k("cr", st.session_state.cr_agent_rows)
 
             api_errs = validate_api_keys("cr", st.session_state.cr_agent_rows)
+            vdb_errs = validate_vector_db("cr", st.session_state.cr_agent_rows)
 
-            all_errs = {**field_errs, **relevant_db_errs, **temp_errs, **topk_errs, **api_errs}
+            all_errs = {**field_errs, **relevant_db_errs, **temp_errs, **topk_errs, **api_errs, **vdb_errs}
             
             st.session_state.field_errors = all_errs
             st.session_state["cr_no_agent_warning"] = no_agents
@@ -625,7 +808,7 @@ def superadmin_ui():
                     "password":      c_pass,
                     "allowed_agents": collect_agent_config("cr", model_map),
                 }
-                
+
                 
                 try:
                     res = requests.post(
@@ -690,9 +873,36 @@ def superadmin_ui():
                     "api_key":     cfg.get("api_key")
                 }
                 if "top_k"     in cfg: row["top_k"]     = cfg["top_k"]
-                if "vector_db" in cfg: row["vector_db"] = cfg["vector_db"]
+
+                if "vector_db" in cfg:
+                    vdb = cfg["vector_db"]
+
+                    if isinstance(vdb, str):
+                        row["vector_db"] = {"provider": vdb, "config": {}}
+                    else:
+                        provider = vdb.get("provider")
+
+                        # normalize UI mapping
+                        if provider == "faiss":
+                            ui_provider = "faiss"
+                        elif provider == "pinecone":
+                            ui_provider = "pinecone"
+                        elif provider == "chroma":
+                            mode = vdb.get("config", {}).get("mode", "local")
+                            ui_provider = "chroma cloud" if mode == "cloud" else "chroma local"
+                        else:
+                            ui_provider = provider
+
+                        row["vector_db"] = {
+                            "provider": ui_provider,
+                            "config": vdb.get("config", {})
+                        }
+        
                 if "database"  in cfg:
-                    st.session_state.cfg_db_connections[i] = list(cfg["database"].values())
+                    # st.session_state.cfg_db_connections[i] = list(cfg["database"].values())
+                    st.session_state.cfg_db_connections[i] = [
+                        dict(db) for db in cfg["database"].values()
+                    ]
 
                 st.session_state.cfg_agent_rows.append(row)
 
@@ -721,14 +931,15 @@ def superadmin_ui():
                 temp_errs = validate_temperature("cfg", st.session_state.cfg_agent_rows)
                 topk_errs = validate_top_k("cfg", st.session_state.cfg_agent_rows)
                 api_errs  = validate_api_keys("cfg", st.session_state.cfg_agent_rows)
+                vdb_errs = validate_vector_db("cfg", st.session_state.cfg_agent_rows)
 
-                errs = {**relevant_db_errs, **temp_errs, **topk_errs, **api_errs}
+                errs = {**relevant_db_errs, **temp_errs, **topk_errs, **api_errs, **vdb_errs}
                 
                 st.session_state.field_errors = errs
                 
                 if errs:
-                    st.warning("Please fix validation errors")
-                    return
+                    st.session_state.field_errors = errs
+                    st.rerun()
 
                 cid = cmap[selected]
 
