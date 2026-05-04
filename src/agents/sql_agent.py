@@ -10,6 +10,7 @@ from src.tools.sql_search import run_sql_query
 from src.Database.connection_manager import ConnectionManager
 from src.Database.schema_extractor.sql_extractor import SQLSchemaExtractor
 from src.utils.logger import logger
+from langsmith import trace as langsmith_trace
 
 
 class SQLAgent(BaseAgent):
@@ -129,7 +130,7 @@ class SQLAgent(BaseAgent):
             logger.warning(f"[SQLAgent] Failed to parse LLM response:\n{raw_output}")
             return []
 
-    async def _execute_query(self, task, sql_connections):
+    async def _execute_query(self, task, sql_connections, original_query):
 
         alias = task.get("connection_alias")
         query = task.get("query")
@@ -147,28 +148,38 @@ class SQLAgent(BaseAgent):
         if not conn_info:
             return None
 
-        try:
-            start = time.perf_counter()
+        with langsmith_trace(f"SQL Execution [{alias}]") as span:
+            try:
+                start = time.perf_counter()
 
-            rows = await asyncio.wait_for(
-                run_sql_query(query, conn_info["connection"]),
-                timeout=10
-            )
+                span.metadata["original_query"] = original_query
+                span.metadata["query"] = query
+                span.metadata["connection_alias"] = alias
 
-            rows = rows[:1000] if rows else []
+                rows = await asyncio.wait_for(
+                    run_sql_query(query, conn_info["connection"]),
+                    timeout=10
+                )
+                
+                rows = rows[:1000] if rows else []
+                span.metadata["rows_preview"] = rows[:3]
+                span.metadata["row_count"] = len(rows)
+                span.metadata["execution_time"] = time.perf_counter() - start
+                
+                logger.info(
+                    f"[SQLAgent] Query executed | alias={alias} | "
+                    f"rows={len(rows)} | time={time.perf_counter() - start:.2f}s"
+                )
 
-            logger.info(
-                f"[SQLAgent] Query executed | alias={alias} | "
-                f"rows={len(rows)} | time={time.perf_counter() - start:.2f}s"
-            )
+            except asyncio.TimeoutError:
+                logger.error(f"[SQLAgent] Query timeout | alias={alias}")
+                span.metadata["timeout"] = True
+                return None
 
-        except asyncio.TimeoutError:
-            logger.error(f"[SQLAgent] Query timeout | alias={alias}")
-            return None
-
-        except Exception:
-            logger.exception(f"[SQLAgent] SQL execution failed | alias={alias}")
-            return None
+            except Exception as e:
+                logger.exception(f"[SQLAgent] SQL execution failed | alias={alias}")
+                span.metadata["error"] = str(e)
+                return None
 
         return {
             "connection": alias,
@@ -195,7 +206,7 @@ class SQLAgent(BaseAgent):
         sql_connections = connections.get("sql", {})
 
         results = await asyncio.gather(*[
-            self._execute_query(task, sql_connections)
+            self._execute_query(task, sql_connections, state["user_query"])
             for task in tasks
         ])
 

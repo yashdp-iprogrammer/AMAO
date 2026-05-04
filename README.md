@@ -566,6 +566,11 @@ VECTOR_DB_PATH=src/vector_stores
 
 # Optional: pre-warm a specific client's graph on startup
 DEPLOYMENT_CLIENT_ID=<client_uuid>
+
+# LangSmith Observability (optional)
+LANGCHAIN_API_KEY=
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_PROJECT=AMAO
 ```
 
 LLM provider routing is now explicit:
@@ -643,3 +648,4 @@ In the Assistant view, expand **Upload & Index Knowledge**, upload PDFs or `.txt
 | Frontend | Streamlit |
 | Package manager | uv |
 | Logging | Structured file + console logger |
+| Observability | LangSmith (tracing via @traceable + langsmith_trace) |

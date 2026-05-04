@@ -7,7 +7,7 @@ from src.prompts.router_prompt import ROUTER_PROMPT
 from src.prompts.final_prompt import FINAL_PROMPT
 from src.utils.logger import logger
 import asyncio
-
+from langsmith import traceable, trace as langsmith_trace
 
 class Orchestrator:
 
@@ -55,17 +55,23 @@ class Orchestrator:
             client_id=state["client_id"]
         )   
 
-        response = await self.llm.ainvoke(routing_prompt)
-        raw_output = response.content.strip()
+        with langsmith_trace("Router Decision") as span:
+            response = await self.llm.ainvoke(routing_prompt)
+            raw_output = response.content.strip()
 
-        try:
-            clean_json = self._extract_json(raw_output)
-            execution_plan: List[Dict[str, str]] = json.loads(clean_json)
-        except Exception:
-            logger.warning("[ORCHESTRATOR] Router failed to parse LLM output, using fallback plan")
-            execution_plan = [
-                {"agent": available_agents[0], "query": query}
-            ]
+            try:
+                clean_json = self._extract_json(raw_output)
+                execution_plan: List[Dict[str, str]] = json.loads(clean_json)
+            except Exception as e:
+                logger.warning("[ORCHESTRATOR] Router failed to parse LLM output, using fallback plan")
+                span.metadata["error"] = str(e)
+                execution_plan = [
+                    {"agent": available_agents[0], "query": query}
+                ]
+
+            span.metadata["query"] = query
+            span.metadata["execution_plan"] = execution_plan
+            span.metadata["raw_output"] = raw_output
 
         filtered_plan = []
         for step in execution_plan:
@@ -125,14 +131,18 @@ class Orchestrator:
                 f"[ORCHESTRATOR] Executing agent | name={agent.name}, step={current_index}"
             )
 
-            try:
-                result = await asyncio.wait_for(agent.run(state), timeout=15)
-            except asyncio.TimeoutError:
-                logger.error(f"[ORCHESTRATOR] Agent timeout: {agent.name}")
-                result = {}
-            except Exception as e:
-                logger.error(f"[ORCHESTRATOR] Agent failed: {agent.name} | error={str(e)}")
-                result = {}
+            with langsmith_trace(f"Agent: {agent.name}") as span:
+                try:
+                    result = await asyncio.wait_for(agent.run(state), timeout=15)
+                    span.metadata["result_keys"] = list(result.keys()) if result else []
+                except asyncio.TimeoutError:
+                    logger.error(f"[ORCHESTRATOR] Agent timeout: {agent.name}")
+                    span.metadata["timeout"] = True
+                    result = {}
+                except Exception as e:
+                    logger.error(f"[ORCHESTRATOR] Agent failed: {agent.name} | error={str(e)}")
+                    span.metadata["error"] = str(e)
+                    result = {}
 
             trace.append(agent.name)
 
@@ -182,7 +192,9 @@ class Orchestrator:
             structured_context=structured_context
         )
 
-        response = await self.llm.ainvoke(prompt)
+        with langsmith_trace("Final Response Generation") as span:
+            span.metadata["context_size"] = len(structured_context)
+            response = await self.llm.ainvoke(prompt)
         state["final_response"] = response.content
 
         logger.info("[ORCHESTRATOR] Final response generated")
@@ -248,6 +260,7 @@ class Orchestrator:
         return builder.compile()
 
 
+    @traceable(name="AMAO Pipeline")
     async def run(self, state: AgentState):
         logger.info("[ORCHESTRATOR] Execution started")
         result = await self.graph.ainvoke(state)

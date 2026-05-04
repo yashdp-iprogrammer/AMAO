@@ -10,6 +10,7 @@ from src.tools.nosql_search import run_nosql_query
 from src.Database.connection_manager import ConnectionManager
 from src.Database.schema_extractor.nosql_extractor import NoSQLSchemaExtractor
 from src.utils.logger import logger
+from langsmith import trace as langsmith_trace
 
 
 class NoSQLAgent(BaseAgent):
@@ -129,7 +130,7 @@ class NoSQLAgent(BaseAgent):
             logger.warning(f"[NoSQLAgent] Failed to parse LLM response:\n{raw}")
             return []
 
-    async def _execute_query(self, task, nosql_connections):
+    async def _execute_query(self, task, nosql_connections, original_query):
 
         alias = task.get("connection_alias")
 
@@ -140,28 +141,39 @@ class NoSQLAgent(BaseAgent):
         if not conn_info:
             return None
 
-        try:
-            start = time.perf_counter()
+        with langsmith_trace(f"NoSQL Execution [{alias}]") as span:
+            try:
+                start = time.perf_counter()
 
-            rows = await asyncio.wait_for(
-                run_nosql_query(task, conn_info),
-                timeout=10
-            )
+                span.metadata["original_query"] = original_query
+                span.metadata["task"] = task
+                span.metadata["db_type"] = conn_info.get("db_type")
 
-            rows = rows[:1000] if rows else []
+                rows = await asyncio.wait_for(
+                    run_nosql_query(task, conn_info),
+                    timeout=10
+                )
 
-            logger.info(
-                f"[NoSQLAgent] Query executed | alias={alias} | "
-                f"rows={len(rows)} | time={time.perf_counter() - start:.2f}s"
-            )
+                rows = rows[:1000] if rows else []
+                span.metadata["rows_preview"] = rows[:3]
+                span.metadata["row_count"] = len(rows)
+                span.metadata["execution_time"] = time.perf_counter() - start
 
-        except asyncio.TimeoutError:
-            logger.error(f"[NoSQLAgent] Query timeout | alias={alias}")
-            return None
 
-        except Exception:
-            logger.exception(f"[NoSQLAgent] NoSQL execution failed | alias={alias}")
-            return None
+                logger.info(
+                    f"[NoSQLAgent] Query executed | alias={alias} | "
+                    f"rows={len(rows)} | time={time.perf_counter() - start:.2f}s"
+                )
+
+            except asyncio.TimeoutError:
+                logger.error(f"[NoSQLAgent] Query timeout | alias={alias}")
+                span.metadata["timeout"] = True
+                return None
+
+            except Exception as e:
+                logger.exception(f"[NoSQLAgent] NoSQL execution failed | alias={alias}")
+                span.metadata["error"] = str(e)
+                return None
 
         return {
             "connection": alias,
@@ -188,7 +200,7 @@ class NoSQLAgent(BaseAgent):
         nosql_connections = connections.get("nosql", {})
 
         results = await asyncio.gather(*[
-            self._execute_query(task, nosql_connections)
+            self._execute_query(task, nosql_connections, state["user_query"])
             for task in tasks
         ])
 
